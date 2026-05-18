@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Reagvis DocGPU Demo</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="card">
+        <h1>Reagvis Document API Demo</h1>
+        <p class="muted">Upload up to 10 files, submit one job, and watch backend response.</p>
+
+        <div class="grid">
+          <label>
+            API Base URL
+            <input id="apiBase" value="https://api.verify.reagvis.com" />
+          </label>
+          <label>
+            Bearer Token
+            <input id="bearer" placeholder="Bearer key_xxx.sk_live_xxx" />
+          </label>
+          <label>
+            Optional x-origin-verify
+            <input id="originVerify" placeholder="Only needed for execute-api direct calls" />
+          </label>
+          <label>
+            Job ID (optional)
+            <input id="jobId" placeholder="demo-20260518T123000Z" />
+          </label>
+        </div>
+
+        <label class="file-box">
+          <span>Select Documents (max 10)</span>
+          <input id="files" type="file" multiple />
+        </label>
+
+        <div class="actions">
+          <button id="runBtn">Upload + Submit Job</button>
+          <button id="pollBtn" class="secondary">Poll Existing Job</button>
+        </div>
+
+        <pre id="log" class="log"></pre>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
