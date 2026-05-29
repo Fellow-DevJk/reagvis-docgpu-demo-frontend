@@ -31,8 +31,17 @@ function makeJobId() {
   return `demo-${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}T${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}Z`;
 }
 
+function normalizeBearerToken(raw) {
+  const token = String(raw || "").trim();
+  if (!token) return "";
+  if (/^Bearer\s+/i.test(token)) return token;
+  if (token.includes(".") && !token.includes(" ")) return "Bearer " + token;
+  return token;
+}
+
 function buildHeaders({ bearer, originVerify, json = false }) {
-  const h = { authorization: bearer };
+  const auth = normalizeBearerToken(bearer);
+  const h = auth ? { authorization: auth } : {};
   if (originVerify.trim()) h["x-origin-verify"] = originVerify.trim();
   if (json) h["content-type"] = "application/json";
   return h;
