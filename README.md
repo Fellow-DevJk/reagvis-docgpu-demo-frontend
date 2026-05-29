@@ -1,22 +1,31 @@
 # Reagvis DocGPU Demo Frontend
 
-Minimal static frontend for demo/presentation:
+Static demo frontend for presentation/UAT.
 
-1. Upload documents (max 10)
-2. Call `POST /uploads/presign`
-3. Upload to S3
+## What it does
+
+1. Upload up to 10 docs (`pdf/jpg/jpeg/png`)
+2. Call `POST /uploads/presign` per file
+3. Upload each file to S3 via presigned URL
 4. Call `POST /jobs`
-5. Poll `GET /jobs/{jobId}`
+5. Poll `GET /jobs/{jobId}` until terminal
+6. Fetch `GET /jobs/{jobId}/report`
+7. Render styled forensic report preview
+8. Export report JSON
+9. Open printable report page for **Save as PDF**
 
-## Usage
+## Run
 
-Open `index.html` in a browser, then provide:
+Open `index.html` directly, or host the folder via any static hosting.
 
-- API base URL (default `https://api.verify.reagvis.com`)
-- Bearer token (`Bearer key_xxx.sk_live_xxx`)
-- Files
+Input required:
 
-## Important
+- `API Base URL` (default: `https://api.verify.reagvis.com`)
+- `Bearer Token` (tenant API key)
+- Optional `x-origin-verify` (only when backend requires it)
 
-If your hosting origin is not CORS-allowed by backend, browser calls will fail.
-For direct execute-api calls, fill `x-origin-verify` if required by environment.
+## Notes
+
+- Browser popup permission is required for printable PDF export page.
+- If your hosting origin is not CORS-allowed by backend, browser calls fail.
+- The demo renders report from `/jobs/{jobId}/report` JSON (operator view), not portal-only internals.
