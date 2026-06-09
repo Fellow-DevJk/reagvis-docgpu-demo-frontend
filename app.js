@@ -27,8 +27,10 @@ function setStatus(label, tone = "") {
 
 function makeJobId() {
   const d = new Date();
-  const p = (n) => String(n).padStart(2, "0");
-  return `demo-${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}T${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}Z`;
+  const p = (n, width = 2) => String(n).padStart(width, "0");
+  const ms = p(d.getUTCMilliseconds(), 3);
+  const rand = Math.random().toString(36).slice(2, 6);
+  return `demo-${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}T${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}${ms}Z-${rand}`;
 }
 
 function normalizeBearerToken(raw) {
