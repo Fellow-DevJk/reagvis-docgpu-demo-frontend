@@ -176,87 +176,347 @@ function scoreToVerdict(score) {
   return "Likely Fake";
 }
 
+function firstDefined(...values) {
+  return values.find((value) => value !== undefined && value !== null && value !== "");
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function readScore(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return clampScore(Math.abs(n) <= 1 ? n * 100 : n);
+}
+
+function fmtMaybePct(value) {
+  const score = readScore(value);
+  return score === null ? "N/A" : fmtPct(score);
+}
+
+function riskLabelToScore(risk = "") {
+  const normalized = String(risk || "").toUpperCase();
+  if (normalized === "CRITICAL") return 95;
+  if (normalized === "HIGH") return 85;
+  if (normalized === "MEDIUM") return 55;
+  if (normalized === "LOW") return 15;
+  return null;
+}
+
+function verdictToRiskScore(verdict = "", fallbackRisk = "") {
+  const normalized = String(verdict || "").toUpperCase();
+  if (normalized.includes("LIKELY_FAKE") || normalized.includes("LIKELY FAKE") || normalized.includes("FAKE")) return 88;
+  if (normalized.includes("REJECT")) return 88;
+  if (normalized.includes("SUSPICIOUS") || normalized.includes("MANUAL_REVIEW") || normalized.includes("MANUAL REVIEW")) return 58;
+  if (normalized.includes("INSUFFICIENT") || normalized.includes("REVIEW")) return 60;
+  if (normalized.includes("AUTHENTIC") || normalized.includes("APPROVE") || normalized.includes("VERIFIED")) return 15;
+  return riskLabelToScore(fallbackRisk);
+}
+
+function toneFromRiskText(value = "") {
+  const normalized = String(value || "").toUpperCase();
+  if (["AUTHENTIC", "LOW", "REAL", "PASS", "APPROVE", "VERIFIED"].includes(normalized)) return "ok";
+  if (["SUSPICIOUS", "MEDIUM", "WARN", "REVIEW", "MANUAL_REVIEW", "SUSPECT"].includes(normalized)) return "warn";
+  if (["LIKELY_FAKE", "HIGH", "CRITICAL", "FAKE", "RISK", "REJECT"].includes(normalized)) return "bad";
+  return "na";
+}
+
+function formatVerdictLabel(value = "") {
+  const normalized = String(value || "").replaceAll("_", " ").trim();
+  if (!normalized) return "";
+  return normalized
+    .toLowerCase()
+    .split(/\s+/)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function collectIdentityValue(docs, key) {
+  for (const doc of docs) {
+    const value = doc?.identity?.[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function reportRoots(report) {
+  const roots = [report];
+  if (report?.report) roots.push(report.report);
+  if (report?.data) roots.push(report.data);
+  if (report?.data?.report) roots.push(report.data.report);
+  if (report?.payload) roots.push(report.payload);
+  return roots.filter((item) => item && typeof item === "object");
+}
+
+function firstFromRoots(roots, key) {
+  for (const root of roots) {
+    if (root?.[key] !== undefined && root?.[key] !== null && root?.[key] !== "") return root[key];
+  }
+  return undefined;
+}
+
+function normalizeReportForTemplate(report) {
+  const roots = reportRoots(report);
+  const root = roots[0] || {};
+  const result = firstFromRoots(roots, "result") || {};
+  const opRaw = firstFromRoots(roots, "operator_view") || result.operator_view || {};
+  const scores = firstFromRoots(roots, "scores") || result.scores || {};
+  const finalVerdict = firstFromRoots(roots, "finalVerdict") || firstFromRoots(roots, "final_verdict") || result.finalVerdict || result.final_verdict || {};
+  const resultSummary = firstFromRoots(roots, "result_summary") || result.result_summary || {};
+  const correlation = firstFromRoots(roots, "correlation") || result.correlation || {};
+  const reportSummary = firstDefined(firstFromRoots(roots, "report_summary"), firstFromRoots(roots, "summary"), resultSummary.summary);
+
+  const inputDocuments = asArray(firstFromRoots(roots, "inputs")?.documents).length
+    ? asArray(firstFromRoots(roots, "inputs").documents)
+    : asArray(result.inputs?.documents);
+  const reportDocuments = asArray(firstFromRoots(roots, "documents")).length
+    ? asArray(firstFromRoots(roots, "documents"))
+    : asArray(result.documents);
+  const batchFiles = reportDocuments.length
+    ? reportDocuments
+    : asArray(firstFromRoots(roots, "files")).length
+    ? asArray(firstFromRoots(roots, "files"))
+    : asArray(result.files).length
+      ? asArray(result.files)
+      : inputDocuments.map((key) => ({ key }));
+  const opDocs = asArray(opRaw.per_document);
+  const perDocVerdicts = asArray(finalVerdict.per_doc_verdicts);
+  const maxDocCount = Math.max(opDocs.length, batchFiles.length, perDocVerdicts.length);
+
+  const docs = Array.from({ length: maxDocCount }, (_, index) => {
+    const opDoc = opDocs[index] || {};
+    const file = batchFiles[index] || {};
+    const promptDoc = perDocVerdicts[index] || {};
+    const rawDocScore = firstDefined(
+      opDoc.per_document_confidence,
+      opDoc.risk_score,
+      opDoc.report_confidence,
+      opDoc.reportConfidence,
+      opDoc.riskScore,
+      opDoc.forensicScore,
+      file.risk_score,
+      file.riskScore,
+      file.forensic_score,
+      file.forensicScore,
+      file.report_confidence,
+      file.reportConfidence,
+      file.overall_risk,
+      promptDoc.confidence
+    );
+    const docScore = readScore(rawDocScore);
+    const rawVerdict = firstDefined(
+      opDoc.per_document_verdict,
+      opDoc.report_verdict,
+      opDoc.reportVerdict,
+      opDoc.forensic_verdict,
+      opDoc.forensicVerdict,
+      promptDoc.verdict,
+      file.verdict,
+      file.report_verdict,
+      file.reportVerdict,
+      file.forensic_verdict,
+      file.forensicVerdict,
+      file.decision
+    );
+    const mappedVerdict = rawVerdict || (docScore === null ? "review" : scoreToVerdict(docScore));
+    const identity = opDoc.identity || file.identity || {};
+
+    return {
+      ...opDoc,
+      s3_key: firstDefined(
+        opDoc.s3_key,
+        opDoc.s3Key,
+        opDoc.s3Uri,
+        opDoc.document_name,
+        opDoc.documentName,
+        opDoc.document_id,
+        file.s3_key,
+        file.s3Key,
+        file.s3Uri,
+        file.key,
+        file.document_name,
+        file.documentName,
+        file.name,
+        promptDoc.doc,
+        promptDoc.document,
+        promptDoc.file,
+        `document-${index + 1}`
+      ),
+      per_document_confidence: docScore === null ? undefined : docScore,
+      per_document_verdict: mappedVerdict,
+      identity,
+      reason_summary: firstDefined(
+        opDoc.reason_summary,
+        opDoc.report_summary,
+        opDoc.reportSummary,
+        promptDoc.key_flag,
+        file.report_summary,
+        file.reportSummary,
+        file.summary,
+        reportSummary,
+        finalVerdict.summary
+      ),
+    };
+  });
+
+  const docScores = docs
+    .map((doc) => readScore(firstDefined(doc.risk_score, doc.per_document_confidence)))
+    .filter((score) => score !== null);
+  const finalVerdictRisk = verdictToRiskScore(
+    firstDefined(finalVerdict.verdict, resultSummary.verdict),
+    firstDefined(finalVerdict.risk, resultSummary.risk)
+  );
+  const overallRisk = firstDefined(
+    readScore(opRaw.risk_score),
+    readScore(firstFromRoots(roots, "riskScore")),
+    readScore(root.riskScore),
+    readScore(firstFromRoots(roots, "overall_batch_risk")),
+    readScore(result.overall_batch_risk),
+    readScore(firstFromRoots(roots, "overall_risk")),
+    readScore(firstFromRoots(roots, "risk_score")),
+    readScore(scores.risk_score),
+    readScore(scores.forensic_score),
+    finalVerdictRisk,
+    docScores.length ? Math.max(...docScores) : null
+  );
+
+  const subjectIdentity = {
+    ...(opRaw?.subject_summary?.identity || {}),
+    ...(firstFromRoots(roots, "candidate_identity") || {}),
+    ...(firstFromRoots(roots, "candidateIdentity") || {}),
+    ...(finalVerdict?.candidate || {}),
+  };
+  subjectIdentity.name = firstDefined(subjectIdentity.name, collectIdentityValue(docs, "name"));
+  subjectIdentity.dob = firstDefined(subjectIdentity.dob, collectIdentityValue(docs, "dob"));
+  subjectIdentity.address = firstDefined(subjectIdentity.address, collectIdentityValue(docs, "address"));
+
+  const fraudPatterns = asArray(finalVerdict.fraud_patterns);
+  const missingDocs = asArray(finalVerdict.missing_docs);
+  const docsExcluded = asArray(finalVerdict.docs_excluded);
+  const derivedIssueIds = [
+    ...fraudPatterns.map((item) => item.pattern || item.detail || "fraud_pattern"),
+    ...missingDocs.map((item) => `missing_${item.type || "document"}`),
+    ...docsExcluded.map((item) => `excluded_${item.doc || "document"}`),
+  ].filter(Boolean);
+  const triggeredIssueIds = asArray(opRaw.triggered_issue_ids).length ? asArray(opRaw.triggered_issue_ids) : derivedIssueIds;
+
+  const flaggedFromVerdicts = docs.filter((doc) => {
+    const verdict = String(doc.per_document_verdict || "").toUpperCase();
+    return verdict && !/(AUTHENTIC|APPROVE|VERIFIED|REAL)/.test(verdict);
+  });
+  const flaggedDocuments = asArray(opRaw.flagged_documents).length
+    ? asArray(opRaw.flagged_documents)
+    : flaggedFromVerdicts.map((doc) => ({
+        s3_key: doc.s3_key,
+        reason_summary: doc.reason_summary || formatVerdictLabel(doc.per_document_verdict) || "Requires analyst review.",
+      }));
+
+  const batchVerdict =
+    formatVerdictLabel(firstDefined(opRaw.batch_verdict, finalVerdict.verdict, resultSummary.verdict, firstFromRoots(roots, "overall_verdict"), firstFromRoots(roots, "overallVerdict"), firstFromRoots(roots, "verdict"))) ||
+    (overallRisk === null ? "Unavailable" : scoreToVerdict(overallRisk));
+  const issueCheck = firstDefined(
+    opRaw.issue_check,
+    finalVerdict.summary,
+    reportSummary,
+    correlation.story,
+    correlation.conclusion
+  );
+
+  return {
+    reportId: firstDefined(root.jobId, root.job_id, firstFromRoots(roots, "jobId"), firstFromRoots(roots, "job_id"), "unknown"),
+    generatedAt: firstDefined(root.generatedAt, root.generated_at, root.updated_at, firstFromRoots(roots, "generatedAt"), firstFromRoots(roots, "updated_at")),
+    riskLevel: firstDefined(finalVerdict.risk, firstFromRoots(roots, "risk_level"), firstFromRoots(roots, "riskLevel")),
+    operator: {
+      ...opRaw,
+      per_document: docs,
+      risk_score: overallRisk,
+      batch_verdict: batchVerdict,
+      identity_match_score: firstDefined(opRaw.identity_match_score, firstFromRoots(roots, "identity_similarity"), firstFromRoots(roots, "identitySimilarity"), result.identity_similarity, finalVerdict.confidence, resultSummary.confidence),
+      subject_summary: { ...(opRaw.subject_summary || {}), identity: subjectIdentity },
+      analyst_notes: firstDefined(opRaw.analyst_notes, finalVerdict.summary, reportSummary, correlation.story),
+      issue_check: issueCheck,
+      triggered_issue_ids: triggeredIssueIds,
+      flagged_documents: flaggedDocuments,
+    },
+  };
+}
+
 const reportStyles = String.raw`
   :root {
     --ink: #10213a;
     --muted: #5b6b82;
     --line: #cfd7e3;
     --line-strong: #96a5bd;
-    --brand: #123b7a;
-    --brand-2: #198b7a;
     --ok: #1f8f55;
     --warn: #c98714;
     --bad: #c23b3b;
     --na: #7d8796;
-    --white: #ffffff;
-    --card-teal-a: #0ea5b7;
-    --card-teal-b: #19c6bf;
-    --card-risk-a: #ff4b7d;
-    --card-risk-b: #ff315f;
-    --card-review-a: #ff9558;
-    --card-review-b: #ff6a86;
-    --card-safe-a: #14c99b;
-    --card-safe-b: #09dd72;
   }
   * { box-sizing: border-box; }
+  @page { size: 297mm 210mm; margin: 10mm; }
   html, body {
     margin: 0;
     padding: 0;
-    background: #dfe6ef;
+    background: #f8f7f5;
     color: var(--ink);
     font-family: Arial, Helvetica, sans-serif;
   }
   .page {
     width: 100%;
-    background: var(--white);
-    padding: 24px 26px;
+    background: #fff;
+    padding: 20px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
   }
   .content {
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: 14px;
   }
   .header {
     display: grid;
-    grid-template-columns: 1.4fr 1fr;
-    gap: 20px;
+    grid-template-columns: 1.3fr 1fr;
+    gap: 16px;
     border-bottom: 1px solid var(--line-strong);
-    padding-bottom: 16px;
+    padding-bottom: 14px;
   }
   .brand-wrap {
     display: flex;
     align-items: center;
-    gap: 14px;
+    gap: 12px;
   }
   .logo {
-    width: 52px;
-    height: 52px;
+    width: 46px;
+    height: 46px;
     object-fit: contain;
     border-radius: 12px;
   }
   .brand-block h1 {
     margin: 0;
-    font-size: 25px;
+    font-size: 24px;
   }
   .brand-block .sub {
-    margin-top: 6px;
+    margin-top: 4px;
     color: var(--muted);
-    font-size: 12px;
-    line-height: 1.5;
+    font-size: 11px;
+    line-height: 1.45;
   }
   .meta {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 10px;
+    gap: 8px;
     align-content: start;
+    min-width: 0;
   }
   .meta-card {
-    border: 1px solid rgba(0,0,0,0.07);
+    border: 1px solid var(--line);
     background: linear-gradient(145deg, #ffffff 0%, #f5f8ff 100%);
-    border-radius: 16px;
-    padding: 16px 20px;
+    border-radius: 12px;
+    padding: 10px 12px;
     position: relative;
     overflow: hidden;
+    min-width: 0;
   }
   .meta-card::before {
     content: '';
@@ -268,143 +528,161 @@ const reportStyles = String.raw`
     background: linear-gradient(90deg, #123b7a, #198b7a);
   }
   .meta-label {
-    font-size: 9.5px;
+    font-size: 9px;
     color: #9aa3b5;
     text-transform: uppercase;
-    letter-spacing: 0.13em;
+    letter-spacing: 0.08em;
     font-weight: 700;
-    margin-bottom: 8px;
+    margin-bottom: 5px;
   }
   .meta-value {
-    font-size: 14px;
+    font-size: 13px;
     font-weight: 700;
     color: #0f1f3d;
     word-break: break-word;
+    overflow-wrap: anywhere;
+    line-height: 1.25;
   }
   .meta-value.mono {
-    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-family: 'Courier New', monospace;
     font-size: 12px;
     color: #123b7a;
   }
   .summary-row {
     display: grid;
     grid-template-columns: 1.35fr .85fr .85fr .85fr;
-    gap: 14px;
+    gap: 10px;
   }
   .summary-card {
     border: 1px solid var(--line);
-    border-radius: 16px;
-    padding: 14px;
-    background: #f9fbff;
+    border-radius: 12px;
+    padding: 12px;
+    min-height: 92px;
+    background: #f8fbff;
   }
   .summary-card.primary {
     color: #fff;
-    background: linear-gradient(135deg, var(--card-teal-a), var(--card-teal-b));
-    box-shadow: 0 10px 22px rgba(14, 165, 183, 0.28);
+    background: linear-gradient(135deg, #123b7a, #198b7a);
+    border: none;
   }
   .summary-title {
-    font-size: 11px;
-    letter-spacing: .12em;
+    font-size: 10px;
+    letter-spacing: .06em;
     text-transform: uppercase;
     font-weight: 700;
     opacity: .82;
+    margin-bottom: 7px;
   }
   .summary-value {
-    margin-top: 10px;
-    font-size: 48px;
-    line-height: 1;
-    font-weight: 800;
-  }
-  .summary-card.primary .summary-value {
-    font-size: 50px;
+    font-size: 32px;
+    line-height: 1.04;
+    font-weight: 700;
+    margin-bottom: 6px;
   }
   .summary-note {
-    margin-top: 9px;
-    font-size: 14px;
-    line-height: 1.45;
+    font-size: 10px;
+    line-height: 1.42;
     color: #44587c;
   }
   .summary-card.primary .summary-note {
-    color: rgba(255,255,255,.95);
+    color: rgba(255,255,255,.88);
   }
   .subject-section {
-    border: 1px solid var(--line);
-    border-radius: 16px;
-    padding: 16px;
-    background: #fbfdff;
+    margin-top: 0;
   }
   .section-heading {
     margin: 0;
-    font-size: 34px;
-    line-height: 1;
+    font-size: 15px;
+    line-height: 1.2;
   }
   .section-subcopy {
-    margin: 10px 0 14px;
+    margin: 6px 0 10px;
     color: var(--muted);
-    font-size: 14px;
+    font-size: 11px;
   }
   .subject-grid {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 12px;
+    gap: 8px;
   }
   .subject-card {
     border: 1px solid var(--line);
-    border-radius: 14px;
-    padding: 12px;
+    border-radius: 11px;
+    padding: 10px;
     background: #fff;
   }
   .subject-label {
-    font-size: 11px;
-    letter-spacing: .12em;
+    font-size: 9px;
+    letter-spacing: .05em;
     text-transform: uppercase;
     color: #8c99ad;
+    margin-bottom: 6px;
   }
   .subject-value {
-    margin-top: 7px;
-    font-size: 31px;
-    line-height: 1.06;
-    font-weight: 800;
+    font-size: 20px;
+    line-height: 1.15;
+    font-weight: 700;
+    margin-bottom: 5px;
+    word-break: break-word;
   }
   .subject-note {
-    margin-top: 7px;
-    font-size: 13px;
+    font-size: 10px;
     color: var(--muted);
     line-height: 1.4;
   }
   .matrix-wrap {
-    border: 1px solid var(--line);
-    border-radius: 16px;
+    border: 1px solid var(--line-strong);
+    border-radius: 12px;
     background: #fff;
     overflow: hidden;
+    break-inside: avoid;
+    page-break-inside: avoid;
   }
   .matrix-head {
-    display: flex;
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: minmax(185px, 1fr) minmax(230px, auto);
     align-items: center;
-    padding: 14px;
+    gap: 18px;
+    padding: 10px 12px;
+    background: #f5f9fd;
     border-bottom: 1px solid var(--line);
+    break-after: avoid;
+    page-break-after: avoid;
   }
   .matrix-head h2 {
     margin: 0;
-    font-size: 38px;
-    line-height: 1;
+    font-size: 15px;
+    line-height: 1.2;
+    white-space: nowrap;
   }
   .legend {
     display: flex;
-    gap: 14px;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: nowrap;
+    column-gap: 14px;
+    row-gap: 4px;
     color: #5f708b;
-    font-size: 12px;
+    font-size: 8.5px;
+    white-space: nowrap;
+    min-width: 230px;
+  }
+  .legend > span {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+    flex: 0 0 auto;
   }
   .chip {
     display: inline-flex;
-    width: 18px;
-    height: 18px;
+    width: 13px;
+    height: 13px;
     border-radius: 999px;
     align-items: center;
     justify-content: center;
-    font-size: 12px;
-    margin-right: 6px;
+    font-size: 8px;
+    line-height: 1;
     border: 1px solid;
   }
   .chip.ok { color: var(--ok); border-color: var(--ok); }
@@ -413,77 +691,96 @@ const reportStyles = String.raw`
   .chip.na { color: var(--na); border-color: var(--na); }
   .matrix-summary {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0,1fr));
-    gap: 10px;
-    padding: 12px;
+    grid-template-columns: 1.15fr .95fr .95fr .95fr;
+    gap: 8px;
+    padding: 10px 12px;
     border-bottom: 1px solid var(--line);
-    background: #f9fbff;
+    background: #f9fcff;
+    break-before: avoid;
+    page-break-before: avoid;
   }
   .matrix-summary-card {
     border: 1px solid var(--line);
-    border-radius: 12px;
+    border-radius: 10px;
     background: #fff;
-    padding: 10px;
+    padding: 8px;
+    min-height: 72px;
   }
   .matrix-summary-label {
-    font-size: 10px;
-    letter-spacing: .12em;
+    font-size: 9px;
     text-transform: uppercase;
     color: #8e9cb2;
+    margin-bottom: 4px;
   }
   .matrix-summary-value {
-    margin-top: 6px;
-    font-size: 14px;
-    font-weight: 800;
+    font-size: 12px;
+    font-weight: 700;
     color: #13284c;
+    line-height: 1.2;
+    margin-bottom: 3px;
   }
   .matrix-summary-note {
-    margin-top: 5px;
-    font-size: 12px;
+    font-size: 10px;
     color: #647897;
-    line-height: 1.35;
+    line-height: 1.4;
   }
   .matrix-scroll { overflow: auto; }
   .matrix {
     width: 100%;
     border-collapse: collapse;
-    min-width: 980px;
+    table-layout: fixed;
+    font-size: 10px;
   }
   .matrix thead th {
     border-right: 1px solid var(--line);
     border-bottom: 1px solid var(--line);
-    background: #f2f6fd;
-    padding: 10px 8px;
-    font-size: 12px;
+    background: #f7fafc;
+    padding: 8px 6px;
     text-align: center;
     color: #23406f;
+    vertical-align: bottom;
   }
   .matrix tbody th,
   .matrix tbody td {
     border-right: 1px solid var(--line);
     border-bottom: 1px solid var(--line);
-    padding: 9px 6px;
+    padding: 7px 6px;
     text-align: center;
-    vertical-align: top;
+    vertical-align: middle;
     background: #fff;
+  }
+  .matrix thead th:first-child {
+    width: 21%;
+    text-align: left;
+    padding-left: 11px;
   }
   .matrix tbody th {
     text-align: left;
-    width: 230px;
-    font-size: 14px;
     color: #162f58;
     background: #f9fbff;
+    padding-left: 11px;
+    font-weight: 700;
+  }
+  .doc-name-wrap {
+    display: block;
+  }
+  .doc-name {
+    display: inline-block;
+    word-break: break-word;
+    line-height: 1.15;
+    font-size: 9px;
   }
   .status {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 24px;
-    height: 24px;
+    width: 18px;
+    height: 18px;
     border-radius: 999px;
-    font-size: 13px;
+    font-size: 10px;
     font-weight: 700;
     border: 1px solid;
+    margin-bottom: 3px;
   }
   .status.ok { color: var(--ok); border-color: var(--ok); }
   .status.warn { color: var(--warn); border-color: var(--warn); }
@@ -491,83 +788,85 @@ const reportStyles = String.raw`
   .status.na { color: var(--na); border-color: var(--na); }
   .tiny {
     display: block;
-    margin-top: 6px;
-    font-size: 11px;
-    color: #5f708b;
-    line-height: 1.26;
+    font-size: 9px;
+    color: #334155;
+    line-height: 1.28;
+    word-break: break-word;
   }
   .score {
     display: block;
-    font-size: 22px;
-    font-weight: 800;
-    color: #113262;
+    font-size: 12px;
+    font-weight: 700;
+    color: #123b7a;
+    line-height: 1.2;
+    margin-bottom: 2px;
   }
   .flagged-section {
-    border: 1px solid var(--line);
-    border-radius: 14px;
-    padding: 14px;
-    background: #fff;
+    margin-top: 0;
   }
   .flagged-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 10px;
+    gap: 8px;
   }
   .flag {
     border: 1px solid var(--line);
-    border-radius: 12px;
+    border-radius: 11px;
     padding: 10px;
-    background: #fbfdff;
+    background: #fff;
   }
-  .flag .f-name { font-size: 14px; font-weight: 800; }
-  .flag .f-note { margin-top: 4px; font-size: 12px; color: #5e718f; }
+  .flag .f-name { font-size: 11px; font-weight: 700; margin-bottom: 4px; }
+  .flag .f-note { font-size: 10px; color: #5e718f; line-height: 1.35; }
   .bottom {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 12px;
+    gap: 10px;
   }
   .note-box {
     border: 1px solid var(--line);
-    border-radius: 14px;
-    padding: 12px;
+    border-radius: 11px;
+    padding: 10px;
     background: #fff;
   }
   .note-box h3 {
-    margin: 0;
-    font-size: 20px;
+    margin: 0 0 7px;
+    font-size: 14px;
   }
   .note-box ul {
-    margin: 10px 0 0;
-    padding-left: 18px;
+    margin: 0;
+    padding-left: 16px;
     color: #1f3760;
-    font-size: 13px;
-    line-height: 1.5;
   }
+  .note-box li { margin-bottom: 5px; font-size: 10px; line-height: 1.35; }
   .note-box p {
-    margin: 10px 0 0;
+    margin: 0;
     color: #1f3760;
-    font-size: 13px;
-    line-height: 1.55;
+    font-size: 10px;
+    line-height: 1.42;
   }
   .footer {
     border-top: 1px solid var(--line);
-    margin-top: 6px;
-    padding-top: 10px;
+    margin-top: 0;
+    padding-top: 8px;
     display: flex;
     justify-content: space-between;
-    color: #637896;
-    font-size: 12px;
+    color: #4f5f77;
+    font-size: 9px;
+  }
+  .mono {
+    font-family: 'Courier New', monospace;
   }
 `;
 
 function buildReportHtml(report) {
-  const op = report?.operator_view || {};
+  const normalized = normalizeReportForTemplate(report);
+  const op = normalized.operator;
   const docs = Array.isArray(op.per_document) ? op.per_document : [];
-  const scores = report?.scores || {};
 
-  const overallRisk = clampScore(op.risk_score ?? (Number(scores.forensic_score || 0) * 100));
-  const batchVerdict = String(op.batch_verdict || scoreToVerdict(overallRisk));
-  const identityMatch = Number.isFinite(Number(op.identity_match_score)) ? fmtPct(op.identity_match_score) : "0%";
+  const overallRisk = readScore(op.risk_score);
+  const batchVerdict = String(op.batch_verdict || (overallRisk === null ? "Unavailable" : scoreToVerdict(overallRisk)));
+  const identityMatch = fmtMaybePct(op.identity_match_score);
+  const issueTone = toneFromRiskText(normalized.riskLevel || batchVerdict);
 
   const subjectIdentity = op?.subject_summary?.identity || {};
   const docSubmittedLabel = docs.length === 1 ? "1 file" : `${docs.length} files`;
@@ -579,25 +878,66 @@ function buildReportHtml(report) {
     "Forensic policy output generated from uploaded document set.";
 
   const issueIds = Array.isArray(op.triggered_issue_ids) ? op.triggered_issue_ids : [];
-  const issueClass = issueIds.length === 0 ? "NO MAJOR ISSUE" : issueIds.length <= 2 ? "REVIEW NEEDED" : "HIGH RISK";
+  const effectiveIssueTone =
+    issueTone !== "na"
+      ? issueTone
+      : issueIds.length === 0
+        ? "ok"
+        : issueIds.length <= 2
+          ? "warn"
+          : "bad";
+  const issueSummary =
+    effectiveIssueTone === "ok"
+      ? {
+          title: "No major issue found",
+          badge: "No Major Issue",
+          copy: "Documents broadly align across current checks.",
+        }
+      : effectiveIssueTone === "warn"
+        ? {
+            title: "Analyst review required",
+            badge: "Needs Review",
+            copy: "Mixed indicators detected. Review before final approval.",
+          }
+        : {
+            title: "Material issues found",
+            badge: "Issue Found",
+            copy: "High-risk indicators detected. Hold batch for manual validation.",
+          };
 
   const rows = [
     {
       label: "Credential Match",
       build: (doc) => {
-        const hasIdentity = Boolean(subjectIdentity.name || subjectIdentity.dob || subjectIdentity.address);
-        if (!hasIdentity) return { tone: "na", note: "name: - ; DOB: - ; addr: -" };
-        if (String(doc.per_document_verdict || "").toLowerCase() === "real") return { tone: "ok", note: "name ✓ ; DOB ✓ ; addr ✓" };
-        return { tone: "warn", note: "name ? ; DOB ? ; addr ?" };
+        const identity = doc.identity || {};
+        const parts = [];
+        const tones = [];
+        const checks = [
+          ["name", "name", subjectIdentity.name, identity.name],
+          ["DOB", "dob", subjectIdentity.dob, identity.dob],
+          ["addr", "address", subjectIdentity.address, identity.address],
+        ];
+        for (const [label, , expected, observed] of checks) {
+          if (!expected || !observed) {
+            parts.push(`${label} -`);
+            tones.push("na");
+            continue;
+          }
+          const matched = String(expected).toLowerCase() === String(observed).toLowerCase();
+          parts.push(`${label} ${matched ? "✓" : "✕"}`);
+          tones.push(matched ? "ok" : "warn");
+        }
+        const tone = tones.every((toneValue) => toneValue === "ok") ? "ok" : tones.includes("warn") ? "warn" : "na";
+        return { tone, note: parts.join("; ") };
       },
     },
     {
       label: "Authenticity Review",
       build: (doc) => {
         const conf = clampScore(doc.per_document_confidence, 0, 100);
-        const verdict = String(doc.per_document_verdict || "review").toLowerCase();
-        const tone = verdict === "real" ? "ok" : verdict === "fake" ? "bad" : "warn";
-        return { tone, note: `${conf}% · ${verdict}`, score: conf };
+        const verdict = String(doc.per_document_verdict || "review");
+        const tone = verdictTone(verdict);
+        return { tone, note: `${formatVerdictLabel(verdict) || "Review"}${Number.isFinite(conf) ? ` (${Math.round(conf)}%)` : ""}` };
       },
     },
     {
@@ -623,7 +963,7 @@ function buildReportHtml(report) {
     .map((doc) => `<th><div class="doc-name-wrap"><span class="doc-name">${escapeHtml(docNameFromKey(doc.s3_key))}</span></div></th>`)
     .join("");
 
-  const symbolByTone = { ok: "✓", warn: "!", bad: "✕", na: "—" };
+  const symbolByTone = { ok: "✓", warn: "!", bad: "✕", na: "-" };
 
   const matrixBody = rows
     .map((row) => {
@@ -672,11 +1012,11 @@ function buildReportHtml(report) {
         <div class="meta">
           <div class="meta-card">
             <div class="meta-label">Report ID</div>
-            <div class="meta-value mono">${escapeHtml(`RVR-${report.jobId || "unknown"}`)}</div>
+            <div class="meta-value mono">${escapeHtml(`RVR-${normalized.reportId || "unknown"}`)}</div>
           </div>
           <div class="meta-card">
             <div class="meta-label">Generated On</div>
-            <div class="meta-value">${escapeHtml(fmtIso(report.generatedAt || report.updated_at))}</div>
+            <div class="meta-value">${escapeHtml(fmtIso(normalized.generatedAt))}</div>
           </div>
           <div class="meta-card">
             <div class="meta-label">KYC Status</div>
@@ -693,7 +1033,7 @@ function buildReportHtml(report) {
         </div>
         <div class="summary-card">
           <div class="summary-title">Risk Score</div>
-          <div class="summary-value">${fmtPct(overallRisk)}</div>
+          <div class="summary-value">${overallRisk === null ? "N/A" : fmtPct(overallRisk)}</div>
           <div class="summary-note">Composite forensic risk across uploaded files.</div>
         </div>
         <div class="summary-card">
@@ -741,8 +1081,8 @@ function buildReportHtml(report) {
           <div class="legend">
             <span><span class="chip ok">✓</span>Pass</span>
             <span><span class="chip warn">!</span>Review</span>
-            <span><span class="chip bad">✕</span>Risk</span>
-            <span><span class="chip na">—</span>Unavailable</span>
+            <span><span class="chip bad">✕</span>Rejected</span>
+            <span><span class="chip na">-</span>Unavailable</span>
           </div>
         </div>
 
@@ -750,12 +1090,12 @@ function buildReportHtml(report) {
           <div class="matrix-summary-card">
             <div class="matrix-summary-label">Batch Verdict</div>
             <div class="matrix-summary-value">${escapeHtml(batchVerdict)}</div>
-            <div class="matrix-summary-note">${escapeHtml(op.issue_check || "No issue summary available.")}</div>
+            <div class="matrix-summary-note">${escapeHtml(executiveSummary)}</div>
           </div>
           <div class="matrix-summary-card">
             <div class="matrix-summary-label">Issue Check</div>
-            <div class="matrix-summary-value">${escapeHtml(issueClass)}</div>
-            <div class="matrix-summary-note">${escapeHtml(op.issue_check || "No issue summary available.")}</div>
+            <div class="matrix-summary-value">${escapeHtml(issueSummary.title)}</div>
+            <div class="matrix-summary-note">${escapeHtml(`${issueSummary.badge}: ${issueSummary.copy}`)}</div>
           </div>
           <div class="matrix-summary-card">
             <div class="matrix-summary-label">Identity Summary</div>
@@ -804,8 +1144,11 @@ function buildReportHtml(report) {
 
         <div class="note-box">
           <h3>Analyst / Model Notes</h3>
-          <p>${escapeHtml(op.analyst_notes || "No additional model narrative was returned for this batch.")}</p>
-          <p><strong>Recommendation:</strong> ${escapeHtml(batchVerdict === "Authentic" ? "Proceed with confidence checks and normal verification flow." : "Analyst review required before final approval.")}</p>
+          <ul>
+            <li>${escapeHtml(op.analyst_notes || "Final decision was generated from forensic and identity review signals.")}</li>
+            <li>${escapeHtml(issueSummary.copy)}</li>
+            <li>${escapeHtml(effectiveIssueTone === "bad" ? "Recommendation: hold flagged documents for manual validation." : "Recommendation: complete standard operator review before final approval.")}</li>
+          </ul>
         </div>
       </section>
 
