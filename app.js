@@ -4,6 +4,9 @@ const state = {
   lastJob: null,
   lastReport: null,
   reportHtml: "",
+  // Client-side document intake validation state (UX gate before upload).
+  //   status: "idle" | "running" | "passed" | "failed"
+  validation: { status: "idle", files: [], overall: null, errors: [] },
 };
 
 const logEl = $("log");
@@ -1314,6 +1317,180 @@ async function handleFetchedReport(report) {
   refreshActionButtons();
 }
 
+/* =====================================================================
+ * Document intake validation — client-side UX gate (PASS/FAIL).
+ * ---------------------------------------------------------------------
+ * This layer decides only whether a document is SUITABLE for reliable
+ * forensic analysis. It does NOT decide authenticity — the backend
+ * forensic model does that asynchronously after submission. Client-side
+ * validation is NOT a security control; the backend must re-validate.
+ * Implementation: validators/* and workers/validation-worker.js.
+ * ===================================================================== */
+
+const intakePill = $("intakePill");
+const intakeHint = $("intakeHint");
+const intakeFilesEl = $("intakeFiles");
+const intakeHandoffEl = $("intakeHandoff");
+
+const STAGE_LABELS = {
+  preparing: "Preparing document…",
+  quality: "Checking image quality…",
+  readability: "Checking readability…",
+};
+const CHECK_MARKS = { pass: "✓", fail: "✕", skip: "–", na: "–" };
+
+function prettyBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function setIntakePill(label, tone = "") {
+  intakePill.textContent = label;
+  intakePill.className = `pill ${tone}`.trim();
+}
+
+function intakeCardId(i) {
+  return `intakeFile-${i}`;
+}
+
+function renderInitialCards(files) {
+  intakeFilesEl.innerHTML = files
+    .map(
+      (file, i) => `
+      <div class="intake-file" id="${intakeCardId(i)}" data-status="running">
+        <div class="if-top">
+          <span class="if-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)} <span class="if-meta">· ${escapeHtml(prettyBytes(file.size))}</span></span>
+          <span class="if-status pill">Queued</span>
+        </div>
+        <div class="if-msg">Waiting to start…</div>
+      </div>`
+    )
+    .join("");
+}
+
+function updateCardStage(i, stage) {
+  const card = $(intakeCardId(i));
+  if (!card) return;
+  card.dataset.status = "running";
+  const status = card.querySelector(".if-status");
+  const msg = card.querySelector(".if-msg");
+  if (status) {
+    status.className = "if-status pill";
+    status.textContent = "Checking…";
+  }
+  if (msg) msg.textContent = STAGE_LABELS[stage] || "Validating…";
+}
+
+function renderChecks(checks) {
+  return checks
+    .map(
+      (c) => `<div class="if-check" data-st="${c.status}">
+        <span class="ic-mark">${CHECK_MARKS[c.status] || "–"}</span>
+        <span class="ic-label">${c.n}. ${escapeHtml(c.label)}</span>
+        <span class="ic-detail">${escapeHtml(c.detail || "")}</span>
+      </div>`
+    )
+    .join("");
+}
+
+function renderCardResult(i, result) {
+  const card = $(intakeCardId(i));
+  if (!card) return;
+  card.dataset.status = result.status;
+  const tone = result.status === "pass" ? "ok" : "bad";
+  const label = result.status === "pass" ? "Accepted" : "Rejected";
+  card.innerHTML = `
+    <div class="if-top">
+      <span class="if-name" title="${escapeHtml(result.name)}">${escapeHtml(result.name)} <span class="if-meta">· ${escapeHtml(result.sizePretty)}</span></span>
+      <span class="if-status pill ${tone}">${label}</span>
+    </div>
+    <div class="if-msg">${escapeHtml(result.headline)}</div>
+    <details class="if-details">
+      <summary>View validation details</summary>
+      <div class="if-check-list">${renderChecks(result.checks)}</div>
+    </details>`;
+  // Raw forensic-suitability scores stay in the console for tuning, never user-facing.
+  if (result.debug) console.debug(`[intake] ${result.name}`, result.debug);
+}
+
+function updateIntakeOverall(overall) {
+  state.validation.overall = overall;
+  state.validation.status = overall.status; // "passed" | "failed"
+  if (overall.status === "passed") {
+    setIntakePill("Ready for forensic analysis", "ok");
+  } else {
+    setIntakePill("Action required", "bad");
+  }
+  intakeHint.textContent = overall.message;
+  updateRunGate();
+}
+
+function updateRunGate() {
+  const passed = state.validation && state.validation.status === "passed";
+  const btn = $("runBtn");
+  btn.disabled = !passed;
+  btn.title = passed
+    ? "Validation passed — upload and submit for forensic analysis."
+    : "Select a document and pass intake validation to enable.";
+}
+
+function showHandoff() {
+  intakeHandoffEl.hidden = false;
+  intakeHandoffEl.innerHTML = `Document accepted for forensic analysis. The forensic job has started.
+    <span class="ih-sub">You may safely leave this page — analysis continues on the server and the report stays available for this Job ID.</span>`;
+}
+
+function hideHandoff() {
+  intakeHandoffEl.hidden = true;
+  intakeHandoffEl.innerHTML = "";
+}
+
+async function handleFilesSelected() {
+  const files = Array.from($("files").files || []);
+  hideHandoff();
+  state.validation = { status: "idle", files: [], overall: null, errors: [] };
+
+  if (!files.length) {
+    intakeFilesEl.innerHTML = "";
+    setIntakePill("No file", "");
+    intakeHint.textContent = "Select a document to begin intake checks.";
+    updateRunGate();
+    return;
+  }
+
+  state.validation.status = "running";
+  state.validation.files = files.map((f) => ({ name: f.name, size: f.size, status: "running" }));
+  setIntakePill("Validating…", "");
+  intakeHint.textContent = "Preparing document for forensic analysis…";
+  renderInitialCards(files);
+  updateRunGate();
+
+  if (!window.ReagvisIntake) {
+    setIntakePill("Unavailable", "bad");
+    intakeHint.textContent = "Validation engine failed to load. Check your connection and reload.";
+    updateRunGate();
+    return;
+  }
+
+  try {
+    await window.ReagvisIntake.validate(files, {
+      stage: (i, stage) => updateCardStage(i, stage),
+      fileResult: (i, result) => {
+        state.validation.files[i] = { name: result.name, size: result.size, status: result.status };
+        renderCardResult(i, result);
+      },
+      overall: (overall) => updateIntakeOverall(overall),
+    });
+  } catch (err) {
+    console.error("[intake] validation error", err);
+    state.validation.status = "failed";
+    setIntakePill("Error", "bad");
+    intakeHint.textContent = "Intake validation could not complete. Please reselect the document.";
+    updateRunGate();
+  }
+}
+
 async function runPipeline() {
   const apiBase = $("apiBase").value.trim().replace(/\/$/, "");
   const bearer = $("bearer").value.trim();
@@ -1331,6 +1508,21 @@ async function runPipeline() {
   }
   if (files.length > 10) {
     log("Max 10 files per job.");
+    return;
+  }
+
+  // Intake validation gate — a document must PASS the client-side suitability
+  // checks before any presign/upload/submit. (Defense in depth: the run button
+  // is already disabled until validation passes, but never upload on FAIL.)
+  const vStatus = state.validation ? state.validation.status : "idle";
+  if (vStatus === "running") {
+    setStatus("Validating", "warn");
+    log("Please wait, document intake is finishing.");
+    return;
+  }
+  if (vStatus !== "passed") {
+    setStatus("Blocked", "bad");
+    log("Document intake validation has not passed. Resolve the flagged issues before submitting.");
     return;
   }
 
@@ -1354,6 +1546,11 @@ async function runPipeline() {
   log("Submitting job...");
   const submit = await submitJob(apiBase, bearer, originVerify, jobId, docs);
   log("Submit response:", submit);
+
+  // Handoff: the async forensic job has started. The user may safely leave now;
+  // the polling/report preview below is a demo convenience, not a requirement.
+  showHandoff();
+  log("Document accepted for forensic analysis. Forensic job submitted — you may safely leave this page.");
 
   setStatus("Processing", "warn");
   log("Polling started (every 5s, up to 10 min)...");
@@ -1507,9 +1704,13 @@ $("runBtn").addEventListener("click", async () => {
     log("Error:", String(err));
     if (err?.details) log("Error details:", err.details);
   } finally {
-    $("runBtn").disabled = false;
+    // Re-gate against validation state instead of unconditionally re-enabling.
+    updateRunGate();
   }
 });
+
+// Start intake validation automatically as soon as files are selected.
+$("files").addEventListener("change", handleFilesSelected);
 
 $("pollBtn").addEventListener("click", async () => {
   try {
@@ -1554,3 +1755,4 @@ $("openPrintableBtn").addEventListener("click", () => {
 
 refreshActionButtons();
 setStatus("Idle");
+updateRunGate();

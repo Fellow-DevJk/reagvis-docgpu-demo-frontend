@@ -45,8 +45,22 @@
           <input id="files" type="file" multiple accept=".pdf,.jpg,.jpeg,.png" />
         </label>
 
+        <!--
+          Document intake / validation panel. Compact, user-facing PASS/FAIL state.
+          Technical per-check detail lives inside each card's "View validation details".
+        -->
+        <section id="intakePanel" class="intake" aria-live="polite">
+          <div class="intake-head">
+            <h2>Document Intake</h2>
+            <span id="intakePill" class="pill">No file</span>
+          </div>
+          <p id="intakeHint" class="muted small">Select a document to begin intake checks.</p>
+          <div id="intakeFiles" class="intake-files"></div>
+          <div id="intakeHandoff" class="intake-handoff" hidden></div>
+        </section>
+
         <div class="actions">
-          <button id="runBtn">Upload + Submit + Poll + Fetch Report</button>
+          <button id="runBtn" disabled title="Select a document and pass intake validation to enable.">Upload + Submit + Poll + Fetch Report</button>
           <button id="pollBtn" class="secondary">Poll Existing Job</button>
           <button id="fetchReportBtn" class="ghost">Fetch Report for Job ID</button>
         </div>
@@ -85,6 +99,28 @@
         <iframe id="reportFrame" title="Forensic Report Preview"></iframe>
       </section>
     </main>
+
+    <!--
+      Intake validation libraries (CDN, classic UMD builds — static-host friendly).
+      PDF.js MUST stay on v3.11.174 legacy: it is the last release shipping a classic
+      <script>-loadable UMD build (v4+ is ESM-only). The worker URL is pinned to the
+      same version inside validators/document-intake.js. No API tokens are exposed to
+      these libraries or to the validation worker — they only ever see file pixels.
+
+      CSP NOTE: default GitHub Pages sets no restrictive Content-Security-Policy, so
+      these loads work as-is. If a CSP is ever added, it MUST allow cdn.jsdelivr.net
+      (and the Tesseract core/lang CDN it auto-fetches) in script-src, worker-src,
+      and connect-src — or self-host the libs + pdf.worker + tessdata to drop the
+      cross-origin dependency entirely.
+    -->
+    <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.min.js"></script>
+
+    <!-- Client-side intake validation layer (load before app.js orchestration) -->
+    <script src="./validators/config.js"></script>
+    <script src="./validators/image-quality.js"></script>
+    <script src="./validators/ocr.js"></script>
+    <script src="./validators/document-intake.js"></script>
 
     <script src="./app.js"></script>
   </body>
