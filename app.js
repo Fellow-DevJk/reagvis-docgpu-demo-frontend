@@ -27,8 +27,10 @@ function setStatus(label, tone = "") {
 
 function makeJobId() {
   const d = new Date();
-  const p = (n) => String(n).padStart(2, "0");
-  return `demo-${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}T${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}Z`;
+  const p = (n, width = 2) => String(n).padStart(width, "0");
+  const ms = p(d.getUTCMilliseconds(), 3);
+  const rand = Math.random().toString(36).slice(2, 6);
+  return `demo-${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}T${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}${ms}Z-${rand}`;
 }
 
 function normalizeBearerToken(raw) {
@@ -45,6 +47,41 @@ function buildHeaders({ bearer, originVerify, json = false }) {
   if (originVerify.trim()) h["x-origin-verify"] = originVerify.trim();
   if (json) h["content-type"] = "application/json";
   return h;
+}
+
+function sanitizeHeaders(headers = {}) {
+  const copy = { ...headers };
+  if (copy.authorization) copy.authorization = "[present]";
+  if (copy.Authorization) copy.Authorization = "[present]";
+  if (copy["x-origin-verify"]) copy["x-origin-verify"] = "[present]";
+  return copy;
+}
+
+function responseMeta(resp, bodyText) {
+  return {
+    url: resp.url,
+    status: resp.status,
+    statusText: resp.statusText,
+    requestId:
+      resp.headers.get("x-amzn-requestid") ||
+      resp.headers.get("x-amz-request-id") ||
+      resp.headers.get("x-request-id") ||
+      null,
+    apiGatewayId: resp.headers.get("x-amz-apigw-id") || null,
+    cfId: resp.headers.get("x-amz-cf-id") || null,
+    cfCache: resp.headers.get("x-cache") || null,
+    contentType: resp.headers.get("content-type") || null,
+    bodyText,
+  };
+}
+
+function buildApiError(label, resp, bodyText, requestMeta = {}) {
+  const err = new Error(`${label} failed (${resp.status}) ${bodyText}`);
+  err.details = {
+    request: requestMeta,
+    response: responseMeta(resp, bodyText),
+  };
+  return err;
 }
 
 function safeJson(v, fallback = {}) {
@@ -94,14 +131,36 @@ function docNameFromKey(s3Key = "") {
 }
 
 async function presign(apiBase, bearer, originVerify, file, jobId) {
-  const resp = await fetch(`${apiBase}/uploads/presign`, {
+  const url = `${apiBase}/uploads/presign`;
+  const headers = buildHeaders({ bearer, originVerify, json: true });
+  log("Presign request:", {
+    url,
     method: "POST",
-    headers: buildHeaders({ bearer, originVerify, json: true }),
+    jobId,
+    filename: file.name,
+    contentType: file.type || "application/octet-stream",
+    headers: sanitizeHeaders(headers),
+  });
+  const resp = await fetch(url, {
+    method: "POST",
+    headers,
     body: JSON.stringify({ filename: file.name, contentType: file.type || "application/octet-stream", jobId }),
   });
   const txt = await resp.text();
   const data = safeJson(txt, {});
-  if (!resp.ok) throw new Error(`presign failed (${resp.status}) ${txt}`);
+  if (!resp.ok) {
+    throw buildApiError("presign", resp, txt, {
+      url,
+      method: "POST",
+      jobId,
+      filename: file.name,
+      headers: sanitizeHeaders(headers),
+    });
+  }
+  log("Presign response:", {
+    request: { url, method: "POST", filename: file.name, jobId },
+    response: responseMeta(resp, txt),
+  });
   return data;
 }
 
@@ -115,7 +174,27 @@ async function uploadOne(file, sign) {
     headers,
     body: file,
   });
-  if (!put.ok) throw new Error(`upload failed (${put.status}) ${await put.text()}`);
+  const txt = await put.text();
+  if (!put.ok) {
+    throw buildApiError("upload", put, txt, {
+      url: sign.uploadUrl,
+      method: "PUT",
+      filename: file.name,
+      s3Key: sign.s3Key || null,
+      s3Uri: sign.s3Uri || null,
+      headers: sanitizeHeaders(headers),
+    });
+  }
+  log("Upload response:", {
+    request: {
+      url: sign.uploadUrl,
+      method: "PUT",
+      filename: file.name,
+      s3Key: sign.s3Key || null,
+      s3Uri: sign.s3Uri || null,
+    },
+    response: responseMeta(put, txt),
+  });
 
   if (typeof sign.s3Uri === "string" && sign.s3Uri.startsWith("s3://")) return sign.s3Uri;
   if (typeof sign.s3Key === "string" && sign.s3Key.startsWith("s3://")) return sign.s3Key;
@@ -127,37 +206,82 @@ async function uploadOne(file, sign) {
 }
 
 async function submitJob(apiBase, bearer, originVerify, jobId, docs) {
-  const resp = await fetch(`${apiBase}/jobs`, {
+  const url = `${apiBase}/jobs`;
+  const headers = buildHeaders({ bearer, originVerify, json: true });
+  log("Submit request:", {
+    url,
     method: "POST",
-    headers: buildHeaders({ bearer, originVerify, json: true }),
+    jobId,
+    documentCount: docs.length,
+    documents: docs,
+    headers: sanitizeHeaders(headers),
+  });
+  const resp = await fetch(url, {
+    method: "POST",
+    headers,
     body: JSON.stringify({ jobId, inputs: { documents: docs } }),
   });
   const txt = await resp.text();
   const data = safeJson(txt, {});
-  if (!resp.ok) throw new Error(`submit failed (${resp.status}) ${txt}`);
+  if (!resp.ok) {
+    throw buildApiError("submit", resp, txt, {
+      url,
+      method: "POST",
+      jobId,
+      documentCount: docs.length,
+      documents: docs,
+      headers: sanitizeHeaders(headers),
+    });
+  }
+  log("Submit response:", {
+    request: { url, method: "POST", jobId, documentCount: docs.length },
+    response: responseMeta(resp, txt),
+  });
   return data;
 }
 
 async function pollJob(apiBase, bearer, originVerify, jobId) {
-  const resp = await fetch(`${apiBase}/jobs/${encodeURIComponent(jobId)}`, {
+  const url = `${apiBase}/jobs/${encodeURIComponent(jobId)}`;
+  const headers = buildHeaders({ bearer, originVerify });
+  const resp = await fetch(url, {
     method: "GET",
-    headers: buildHeaders({ bearer, originVerify }),
+    headers,
   });
   const txt = await resp.text();
   const data = safeJson(txt, {});
-  if (!resp.ok) throw new Error(`poll failed (${resp.status}) ${txt}`);
+  if (!resp.ok) {
+    throw buildApiError("poll", resp, txt, {
+      url,
+      method: "GET",
+      jobId,
+      headers: sanitizeHeaders(headers),
+    });
+  }
   return data;
 }
 
 async function fetchReport(apiBase, bearer, originVerify, jobId, includeDownloadUrls = false) {
   const q = includeDownloadUrls ? "?includeDownloadUrls=1" : "";
-  const resp = await fetch(`${apiBase}/jobs/${encodeURIComponent(jobId)}/report${q}`, {
+  const url = `${apiBase}/jobs/${encodeURIComponent(jobId)}/report${q}`;
+  const headers = buildHeaders({ bearer, originVerify });
+  const resp = await fetch(url, {
     method: "GET",
-    headers: buildHeaders({ bearer, originVerify }),
+    headers,
   });
   const txt = await resp.text();
   const data = safeJson(txt, {});
-  if (!resp.ok) throw new Error(`report fetch failed (${resp.status}) ${txt}`);
+  if (!resp.ok) {
+    throw buildApiError("report fetch", resp, txt, {
+      url,
+      method: "GET",
+      jobId,
+      headers: sanitizeHeaders(headers),
+    });
+  }
+  log("Report response:", {
+    request: { url, method: "GET", jobId },
+    response: responseMeta(resp, txt),
+  });
   return data;
 }
 
@@ -1223,6 +1347,7 @@ async function runPipeline() {
     log(`Upload: ${file.name}`);
     const uri = await uploadOne(file, sign);
     docs.push(uri);
+    log("Uploaded document URI:", { file: file.name, uri });
   }
 
   setStatus("Submitting", "warn");
@@ -1380,6 +1505,7 @@ $("runBtn").addEventListener("click", async () => {
   } catch (err) {
     setStatus("Error", "bad");
     log("Error:", String(err));
+    if (err?.details) log("Error details:", err.details);
   } finally {
     $("runBtn").disabled = false;
   }
@@ -1391,6 +1517,7 @@ $("pollBtn").addEventListener("click", async () => {
   } catch (err) {
     setStatus("Error", "bad");
     log("Poll error:", String(err));
+    if (err?.details) log("Poll error details:", err.details);
   }
 });
 
@@ -1400,6 +1527,7 @@ $("fetchReportBtn").addEventListener("click", async () => {
   } catch (err) {
     setStatus("Error", "bad");
     log("Report fetch error:", String(err));
+    if (err?.details) log("Report fetch error details:", err.details);
   }
 });
 
