@@ -132,6 +132,11 @@
     // The whole-centre test above misses this (the page still has text). Fraction
     // of content blocks that are bright-smooth hotspots; clean paper reads ~0. [tune]
     glareHotspotMaxRatio: 0.05,
+    // Third glare signal: localized BLOWN (clipped-white) streaks on a page that
+    // is NOT uniformly blown — a specular reflection on bright/laminated paper.
+    // A clean bright scan is uniformly blown and scores 0. Real glare photos read
+    // ~2-5% of content blocks as blown streaks. [DEMO — tune]
+    glareStreakMaxRatio: 0.015,
 
     // Shadow / uneven lighting. Conservative: requires BOTH a large very-dark
     // area AND strong quadrant unevenness, so a single dark element (an ID photo,

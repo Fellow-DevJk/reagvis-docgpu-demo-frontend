@@ -202,10 +202,12 @@
     // specular reflection — a smooth hotspot much brighter than the paper — on an
     // otherwise readable page.
     const hotspot = metrics.glareHotspotRatio || 0;
+    const streak = metrics.glareStreakRatio || 0;
     const glareBad =
       (metrics.glareCenterRatio > CFG.maxGlareAreaRatio &&
         metrics.centerEdgeDensity < CFG.glareMaxCenterEdgeDensity) ||
-      hotspot > CFG.glareHotspotMaxRatio;
+      hotspot > CFG.glareHotspotMaxRatio ||
+      streak > CFG.glareStreakMaxRatio;
     add(
       "glare",
       9,
@@ -217,6 +219,8 @@
         (metrics.centerEdgeDensity * 100).toFixed(1) +
         "%, hotspot " +
         (hotspot * 100).toFixed(1) +
+        "%, streak " +
+        (streak * 100).toFixed(1) +
         "%",
       glareBad
         ? "The image has glare/reflection on the document. Please retake the photo without flash or reflections."

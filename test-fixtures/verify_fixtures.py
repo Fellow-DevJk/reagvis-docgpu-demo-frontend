@@ -43,6 +43,7 @@ CFG = dict(
     maxGlareAreaRatio=0.15,
     glareMaxCenterEdgeDensity=0.02,
     glareHotspotMaxRatio=0.05,
+    glareStreakMaxRatio=0.015,
     maxShadowAreaRatio=0.10,
     maxShadowUnevenness=95,
     maxNoiseStd=12,
@@ -96,21 +97,27 @@ def native_center_crop(im, maxside):
     return np.asarray(im.crop((l, t, l + cw, t + ch)), dtype=np.float32)
 
 
-def glare_hotspot(Y, edge_full):
+def glare_analysis(Y, edge_full):
     H, W = Y.shape
     bs = max(8, H // 16)
-    means, edges = [], []
+    means, edges, blown = [], [], []
     for by in range(0, H - bs + 1, bs):
         for bx in range(0, W - bs + 1, bs):
-            means.append(float(Y[by:by + bs, bx:bx + bs].mean()))
+            b = Y[by:by + bs, bx:bx + bs]
+            means.append(float(b.mean()))
             edges.append(float(edge_full[by:by + bs, bx:bx + bs].mean()))
-    means, edges = np.array(means), np.array(edges)
+            blown.append(float((b >= 250).mean()))
+    means, edges, blown = np.array(means), np.array(edges), np.array(blown)
     content = means >= 100
     if content.sum() == 0:
-        return 0.0
+        return 0.0, 0.0
     paper_med = float(np.median(means[content]))
-    glare = content & (means > paper_med + 45) & (edges < 0.03)
-    return float(glare.sum() / content.sum())
+    med_blown = float(np.median(blown[content]))
+    hotspot = float((content & (means > paper_med + 45) &
+                     (edges < 0.03)).sum() / content.sum())
+    streak = float((content & (blown > 0.25)).sum() /
+                   content.sum()) if med_blown < 0.5 else 0.0
+    return hotspot, streak
 
 
 def laplacian(Y):
@@ -171,7 +178,8 @@ def metrics(im):
     m["centerEdgeDensity"] = float(ec.mean()) if ec.size else 0.0
     edge_full = np.zeros(Y.shape, dtype=np.float32)
     edge_full[1:-1, 1:-1] = edge.astype(np.float32)
-    m["glareHotspotRatio"] = glare_hotspot(Y, edge_full)
+    m["glareHotspotRatio"], m["glareStreakRatio"] = glare_analysis(
+        Y, edge_full)
     # noise on the NATIVE crop (luma + chroma)
     luma, chroma = flat_noise_lc(
         native_center_crop(im, CFG["noiseCropMaxSide"]))
@@ -333,9 +341,10 @@ def evaluate(path):
     if has_content and m["blurVar"] < CFG["minBlurScore"]:
         fails.append("blur")
     # 9 glare
-    if (m["glareCenterRatio"] > CFG["maxGlareAreaRatio"]
-            and m["centerEdgeDensity"] < CFG["glareMaxCenterEdgeDensity"]
-        ) or m["glareHotspotRatio"] > CFG["glareHotspotMaxRatio"]:
+    if ((m["glareCenterRatio"] > CFG["maxGlareAreaRatio"]
+         and m["centerEdgeDensity"] < CFG["glareMaxCenterEdgeDensity"])
+            or m["glareHotspotRatio"] > CFG["glareHotspotMaxRatio"]
+            or m["glareStreakRatio"] > CFG["glareStreakMaxRatio"]):
         fails.append("glare")
     # 8 shadow (BOTH conditions)
     if m["veryDarkRatio"] > CFG["maxShadowAreaRatio"] and m[

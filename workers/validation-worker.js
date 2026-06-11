@@ -31,6 +31,7 @@ const BLOWN_MAX_SAT = 12; // ...and chroma below this ⇒ specular/white, not co
 const EDGE_LAP = 24; // |Laplacian| at/above this counts as a structural edge
 const GLARE_HOTSPOT_DELTA = 45; // a block this much brighter than the paper median = glare
 const GLARE_HOTSPOT_MAX_EDGE = 0.03; // ...and this smooth (specular reflections have no text)
+const GLARE_STREAK_BLOWN = 0.25; // a block with >this fraction clipped-white = a blown streak
 // 3x3 window range below this is "flat" (used for the noise estimate). It must be
 // LARGE enough that a genuinely noisy-but-textureless window still qualifies as
 // flat — otherwise the noise check is unreachable (a window noisy enough to
@@ -183,10 +184,14 @@ function computeMetrics(W, H, buffer, noiseFrame) {
   const edgeDensityGlobal = lapN ? edgeGlobal / lapN : 0;
   const centerEdgeDensity = centerInterior ? edgeCenter / centerInterior : 0;
 
-  // Localized glare/reflection: a smooth (low-edge) region that is much brighter
-  // than the surrounding document paper — catches a specular hotspot ON a
-  // readable page, which the whole-centre glareCenterRatio test misses.
-  const glareHotspotRatio = glareHotspot(gray, edgeMap, W, H);
+  // Localized glare/reflection analysis on a coarse block grid. Two signals:
+  //  - hotspot: a smooth region much brighter than the paper (glare on a dim page)
+  //  - streak:  localized blown (clipped-white) blocks on an otherwise NON-uniformly
+  //             -blown page (specular streaks on bright/laminated paper). A clean
+  //             scan is UNIFORMLY blown, so it scores 0 here.
+  const glareA = glareAnalysis(gray, edgeMap, W, H);
+  const glareHotspotRatio = glareA.hotspot;
+  const glareStreakRatio = glareA.streak;
 
   // ---------------- Noise (luma + chroma) on the NATIVE crop ----------------
   // Measured on msg.noiseBuffer (a native-resolution centre crop) so real grain
@@ -233,6 +238,7 @@ function computeMetrics(W, H, buffer, noiseFrame) {
     shadowUnevenness: shadowUnevenness,
     glareCenterRatio: glareCenterRatio,
     glareHotspotRatio: glareHotspotRatio,
+    glareStreakRatio: glareStreakRatio,
     blurVar: blurVar,
     edgeDensityGlobal: edgeDensityGlobal,
     centerEdgeDensity: centerEdgeDensity,
@@ -349,43 +355,61 @@ function variance(arr) {
   return s2 / arr.length - m * m;
 }
 
-// Localized glare/reflection detector. Splits the frame into a coarse block grid;
-// among "content" blocks (bright enough to be document, not dark background),
-// counts blocks that are BOTH much brighter than the paper median AND smooth
-// (few edges) — i.e. specular highlights sitting on the page. Returns the
-// fraction of content blocks that are such hotspots. Clean uniform paper → ~0.
-function glareHotspot(gray, edgeMap, W, H) {
+// Localized glare/reflection detector over a coarse block grid. For each block it
+// measures mean brightness, edge density, and blown (clipped-white) fraction, then
+// among "content" blocks (bright enough to be document, not dark background)
+// returns two ratios:
+//   hotspot — blocks much brighter than the paper median AND smooth (no text):
+//             a specular highlight on a dim/under-lit page.
+//   streak  — blocks heavily blown (clipped white), but ONLY when the page is not
+//             uniformly blown (a clean bright scan is uniformly blown → 0): a
+//             specular reflection streak on bright/laminated paper.
+function glareAnalysis(gray, edgeMap, W, H) {
   const bs = Math.max(8, (H / 16) | 0);
   const means = [];
   const edges = [];
+  const blown = [];
   for (let by = 0; by + bs <= H; by += bs) {
     for (let bx = 0; bx + bs <= W; bx += bs) {
       let sum = 0;
       let ec = 0;
+      let bc = 0;
       let n = 0;
       for (let y = by; y < by + bs; y++) {
         const row = y * W;
         for (let x = bx; x < bx + bs; x++) {
-          sum += gray[row + x];
+          const v = gray[row + x];
+          sum += v;
           ec += edgeMap[row + x];
+          if (v >= BLOWN_LEVEL) bc++;
           n++;
         }
       }
       means.push(sum / n);
       edges.push(ec / n);
+      blown.push(bc / n);
     }
   }
   const content = [];
   for (let i = 0; i < means.length; i++) if (means[i] >= 100) content.push(i);
-  if (content.length === 0) return 0;
-  const sorted = content.map(function (i) { return means[i]; }).sort(function (a, b) { return a - b; });
-  const paperMed = sorted[sorted.length >> 1];
-  let glare = 0;
+  if (content.length === 0) return { hotspot: 0, streak: 0 };
+  const cm = content.map(function (i) { return means[i]; }).sort(function (a, b) { return a - b; });
+  const cb = content.map(function (i) { return blown[i]; }).sort(function (a, b) { return a - b; });
+  const paperMed = cm[cm.length >> 1];
+  const medBlown = cb[cb.length >> 1];
+  let hotspot = 0;
+  let streak = 0;
   for (let k = 0; k < content.length; k++) {
     const i = content[k];
-    if (means[i] > paperMed + GLARE_HOTSPOT_DELTA && edges[i] < GLARE_HOTSPOT_MAX_EDGE) glare++;
+    if (means[i] > paperMed + GLARE_HOTSPOT_DELTA && edges[i] < GLARE_HOTSPOT_MAX_EDGE) hotspot++;
+    if (blown[i] > GLARE_STREAK_BLOWN) streak++;
   }
-  return glare / content.length;
+  return {
+    hotspot: hotspot / content.length,
+    // A uniformly-blown page (clean bright scan) is not glare — only count streaks
+    // when most of the page is NOT blown.
+    streak: medBlown < 0.5 ? streak / content.length : 0,
+  };
 }
 
 // Otsu's threshold over a grayscale histogram.
