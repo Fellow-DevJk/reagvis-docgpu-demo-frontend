@@ -52,6 +52,7 @@
       "This file's contents don't match its extension. Upload a genuine PDF, JPG, JPEG, or PNG.",
     too_large: "This file is larger than the 50 MB limit. Please upload a smaller file.",
     too_small: "This file looks empty or truncated. Please upload a complete document.",
+    dimensions_too_large: "This image's pixel dimensions are too large to process safely. Please resize it and try again.",
     corrupt_pdf: "This PDF appears to be corrupted or unreadable. Please re-export it and try again.",
     corrupt_image: "This image appears to be corrupted. Please upload a valid JPG, JPEG, or PNG.",
     pdf_password: "This PDF is password protected. Please upload an unlocked version.",
@@ -170,16 +171,26 @@
       checks.push(mk("signature", 3, "Extension vs signature", "fail", "could not read header", MSG.mime_mismatch));
       return { ok: false, checks: checks, failure: { id: "signature", message: MSG.mime_mismatch } };
     }
+    // We route decoding by the SNIFFED content type, not the extension — so a
+    // benign rename (a real PNG named .jpg, or vice-versa) is fine. We only reject
+    // when the content isn't one of our supported types at all (e.g. a zip/exe
+    // renamed .pdf). The dangerous "lie" is caught because its signature is
+    // unknown, not because the extension disagrees.
     const sig = detectSignature(head);
-    const okExts = sig ? TYPE_TO_EXT[sig] || [] : [];
-    if (!sig || okExts.indexOf(ext) === -1) {
-      checks.push(
-        mk("signature", 3, "Extension vs signature", "fail", "sig " + (sig || "unknown") + " vs ." + ext, MSG.mime_mismatch)
-      );
+    if (!sig) {
+      checks.push(mk("signature", 3, "Extension vs signature", "fail", "content not PDF/JPG/PNG (ext ." + ext + ")", MSG.mime_mismatch));
       return { ok: false, checks: checks, failure: { id: "signature", message: MSG.mime_mismatch } };
     }
-    checks.push(mk("signature", 3, "Extension vs signature", "pass", "sig " + sig + " matches ." + ext));
-
+    const matches = (TYPE_TO_EXT[sig] || []).indexOf(ext) !== -1;
+    checks.push(
+      mk(
+        "signature",
+        3,
+        "Extension vs signature",
+        "pass",
+        matches ? "content is " + sig + ", matches ." + ext : "content is " + sig + " (ext ." + ext + ") — processing by content"
+      )
+    );
     return { ok: true, kind: sig, checks: checks };
   }
 
@@ -190,10 +201,112 @@
   }
 
   // ---- Decode (corruption + password) ---------------------------------------
-  // Returns { failure?, isPdf, canvas, imageData, origWidth, origHeight, decodeChecks:[...] }
+  // Returns { failure?, isPdf, frames:[{canvas, imageData, noiseImageData,
+  // origWidth, origHeight, pageIndex}], decodeChecks:[...] }
   async function decode(file, kind) {
     if (kind === "pdf") return decodePdf(file);
-    return decodeImage(file);
+    return decodeImage(file, kind);
+  }
+
+  // Native-resolution centre crop (for noise) of an ImageBitmap/<img>/canvas.
+  function nativeCropImageData(source, sw, sh) {
+    try {
+      const cw = Math.max(1, Math.min(sw, CFG.noiseCropMaxSide));
+      const ch = Math.max(1, Math.min(sh, CFG.noiseCropMaxSide));
+      const sx = Math.floor((sw - cw) / 2);
+      const sy = Math.floor((sh - ch) / 2);
+      const c = makeCanvas(cw, ch);
+      const ctx = c.getContext("2d", { willReadFrequently: true });
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, cw, ch);
+      ctx.drawImage(source, sx, sy, cw, ch, 0, 0, cw, ch);
+      return ctx.getImageData(0, 0, cw, ch);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // Read pixel dimensions from the PNG/JPEG header WITHOUT decoding, so a
+  // decompression bomb is rejected before createImageBitmap allocates gigabytes.
+  async function readImageDimensions(file, kind) {
+    try {
+      if (kind === "png") {
+        const b = new Uint8Array(await file.slice(0, 24).arrayBuffer());
+        if (b.length < 24) return null;
+        const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+        return { w: dv.getUint32(16), h: dv.getUint32(20) };
+      }
+      if (kind === "jpg") {
+        const b = new Uint8Array(await file.slice(0, 131072).arrayBuffer());
+        let o = 2; // skip SOI (FF D8)
+        while (o + 9 < b.length) {
+          if (b[o] !== 0xff) {
+            o++;
+            continue;
+          }
+          const marker = b[o + 1];
+          const isSOF =
+            (marker >= 0xc0 && marker <= 0xc3) ||
+            (marker >= 0xc5 && marker <= 0xc7) ||
+            (marker >= 0xc9 && marker <= 0xcb) ||
+            (marker >= 0xcd && marker <= 0xcf);
+          if (isSOF) {
+            const h = (b[o + 5] << 8) | b[o + 6];
+            const w = (b[o + 7] << 8) | b[o + 8];
+            return { w: w, h: h };
+          }
+          if (marker === 0xd8 || marker === 0xd9 || (marker >= 0xd0 && marker <= 0xd7) || marker === 0x01) {
+            o += 2;
+            continue;
+          }
+          const len = (b[o + 2] << 8) | b[o + 3];
+          if (len <= 0) break;
+          o += 2 + len;
+        }
+      }
+    } catch (e) {
+      /* ignore */
+    }
+    return null;
+  }
+
+  // Truncation guard: a complete JPEG ends with the EOI marker (FF D9), a complete
+  // PNG with the fixed IEND chunk. createImageBitmap may PARTIALLY decode a
+  // truncated file without throwing, so we check the tail explicitly.
+  async function isTruncated(file, kind) {
+    try {
+      const tail = new Uint8Array(await file.slice(Math.max(0, file.size - 8)).arrayBuffer());
+      if (tail.length < 2) return true;
+      if (kind === "jpg") {
+        return !(tail[tail.length - 2] === 0xff && tail[tail.length - 1] === 0xd9);
+      }
+      if (kind === "png") {
+        const iend = [0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82];
+        if (tail.length < 8) return true;
+        for (let i = 0; i < 8; i++) if (tail[i] !== iend[i]) return true;
+        return false;
+      }
+    } catch (e) {
+      /* ignore */
+    }
+    return false;
+  }
+
+  function renderFrameFromSource(source, ow, oh, pageIndex, isPdf) {
+    const longSide = Math.max(ow, oh);
+    const scale = longSide > CFG.downscaleLongSide ? CFG.downscaleLongSide / longSide : 1;
+    const tw = Math.max(1, Math.round(ow * scale));
+    const th = Math.max(1, Math.round(oh * scale));
+    const canvas = makeCanvas(tw, th);
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, tw, th);
+    ctx.drawImage(source, 0, 0, tw, th);
+    const imageData = ctx.getImageData(0, 0, tw, th);
+    // Native-res crop for noise — only meaningful for camera/scanner images;
+    // PDFs are vector-rendered (no sensor grain), so skip it for them.
+    const noiseImageData = isPdf ? null : nativeCropImageData(source, ow, oh);
+    return { canvas: canvas, imageData: imageData, noiseImageData: noiseImageData, origWidth: ow, origHeight: oh, pageIndex: pageIndex };
   }
 
   async function decodePdf(file) {
@@ -228,29 +341,37 @@
           ],
         };
       }
-      // InvalidPDFException / MissingPDFException / anything else ⇒ corrupt.
       return decodeFail("corruption", MSG.corrupt_pdf, name || "load error", true);
     }
 
-    let canvas, imageData, ow, oh;
+    const total = pdf.numPages || 1;
+    const pagesToCheck = Math.max(1, Math.min(total, CFG.pdfPagesToValidate || 1));
+    const frames = [];
     try {
-      const page = await pdf.getPage(1);
-      const dpr = global.devicePixelRatio || 1;
-      const baseScale = Math.min(2.0, 1.5 * dpr);
-      const vp0 = page.getViewport({ scale: baseScale });
-      const longSide = Math.max(vp0.width, vp0.height);
-      // Render directly at a scale that lands the long side near downscaleLongSide.
-      const scale = longSide > CFG.downscaleLongSide ? (baseScale * CFG.downscaleLongSide) / longSide : baseScale;
-      const vp = page.getViewport({ scale: scale });
-      canvas = makeCanvas(Math.max(1, Math.ceil(vp.width)), Math.max(1, Math.ceil(vp.height)));
-      const ctx = canvas.getContext("2d", { willReadFrequently: true });
-      ctx.fillStyle = "#ffffff"; // PDF pages can be transparent — composite on white.
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      await page.render({ canvasContext: ctx, viewport: vp }).promise;
-      imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      ow = canvas.width;
-      oh = canvas.height;
-      if (page.cleanup) page.cleanup();
+      for (let pageNum = 1; pageNum <= pagesToCheck; pageNum++) {
+        const page = await pdf.getPage(pageNum);
+        const dpr = global.devicePixelRatio || 1;
+        const baseScale = Math.min(2.0, 1.5 * dpr);
+        const vp0 = page.getViewport({ scale: baseScale });
+        const longSide = Math.max(vp0.width, vp0.height);
+        const scale = longSide > CFG.downscaleLongSide ? (baseScale * CFG.downscaleLongSide) / longSide : baseScale;
+        const vp = page.getViewport({ scale: scale });
+        const canvas = makeCanvas(Math.max(1, Math.ceil(vp.width)), Math.max(1, Math.ceil(vp.height)));
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        await page.render({ canvasContext: ctx, viewport: vp }).promise;
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        frames.push({
+          canvas: canvas,
+          imageData: imageData,
+          noiseImageData: null,
+          origWidth: canvas.width,
+          origHeight: canvas.height,
+          pageIndex: pageNum,
+        });
+        if (page.cleanup) page.cleanup();
+      }
     } catch (err) {
       try {
         pdf.cleanup();
@@ -267,20 +388,28 @@
       /* ignore */
     }
 
+    const pagesNote = total > pagesToCheck ? pagesToCheck + " of " + total + " pages checked" : total + " page(s) rendered";
     return {
       isPdf: true,
-      canvas: canvas,
-      imageData: imageData,
-      origWidth: ow,
-      origHeight: oh,
+      frames: frames,
       decodeChecks: [
-        mk("corruption", 4, "File integrity", "pass", "PDF parsed; page 1 rendered."),
+        mk("corruption", 4, "File integrity", "pass", "PDF parsed; " + pagesNote + "."),
         mk("password", 5, "Password / encryption", "pass", "Not encrypted."),
       ],
     };
   }
 
-  async function decodeImage(file) {
+  async function decodeImage(file, kind) {
+    // Bomb guard 1: reject absurd dimensions from the header BEFORE decoding.
+    const dims = await readImageDimensions(file, kind);
+    if (dims && dims.w * dims.h > CFG.maxImagePixels) {
+      return decodeBomb(dims.w + "x" + dims.h);
+    }
+    // Truncation guard: a partial file may still decode to a gray frame.
+    if (await isTruncated(file, kind)) {
+      return decodeFail("corruption", MSG.corrupt_image, "truncated (missing end marker)", false);
+    }
+
     let bmp = null;
     let imgEl = null;
     let objectUrl = null;
@@ -289,7 +418,9 @@
     try {
       if (typeof global.createImageBitmap === "function") {
         try {
-          bmp = await global.createImageBitmap(file);
+          // imageOrientation:"from-image" applies EXIF orientation (matching the
+          // <img> fallback), so portrait phone photos aren't decoded sideways.
+          bmp = await global.createImageBitmap(file, { imageOrientation: "from-image" });
           ow = bmp.width;
           oh = bmp.height;
         } catch (err) {
@@ -305,30 +436,19 @@
         oh = imgEl.naturalHeight;
       }
       if (!ow || !oh) return decodeFail("corruption", MSG.corrupt_image, "zero dimensions", false);
+      // Bomb guard 2: covers formats whose header we couldn't pre-parse.
+      if (ow * oh > CFG.maxImagePixels) return decodeBomb(ow + "x" + oh);
 
-      const longSide = Math.max(ow, oh);
-      const scale = longSide > CFG.downscaleLongSide ? CFG.downscaleLongSide / longSide : 1;
-      const tw = Math.max(1, Math.round(ow * scale));
-      const th = Math.max(1, Math.round(oh * scale));
-      const canvas = makeCanvas(tw, th);
-      const ctx = canvas.getContext("2d", { willReadFrequently: true });
-      ctx.fillStyle = "#ffffff"; // composite transparent PNGs over white.
-      ctx.fillRect(0, 0, tw, th);
-      ctx.drawImage(bmp || imgEl, 0, 0, tw, th);
-
-      let imageData;
+      let frame;
       try {
-        imageData = ctx.getImageData(0, 0, tw, th);
+        frame = renderFrameFromSource(bmp || imgEl, ow, oh, 1, false);
       } catch (err) {
-        return decodeFail("corruption", MSG.corrupt_image, "getImageData failed", false);
+        return decodeFail("corruption", MSG.corrupt_image, "draw/getImageData failed", false);
       }
 
       return {
         isPdf: false,
-        canvas: canvas,
-        imageData: imageData,
-        origWidth: ow,
-        origHeight: oh,
+        frames: [frame],
         decodeChecks: [
           mk("corruption", 4, "File integrity", "pass", "Image decoded (" + ow + "x" + oh + ")."),
           mk("password", 5, "Password / encryption", "na", "Not applicable (images aren't encrypted)."),
@@ -338,6 +458,16 @@
       if (bmp && bmp.close) bmp.close();
       if (objectUrl) global.URL.revokeObjectURL(objectUrl);
     }
+  }
+
+  function decodeBomb(dimsLabel) {
+    return {
+      failure: { id: "size", message: MSG.dimensions_too_large },
+      decodeChecks: [
+        mk("corruption", 4, "File integrity", "fail", dimsLabel + "px exceeds pixel limit", MSG.dimensions_too_large),
+        mk("password", 5, "Password / encryption", "na", "Not checked (image too large)."),
+      ],
+    };
   }
 
   function loadViaImgElement(file) {
@@ -393,45 +523,86 @@
     });
   }
 
+  // Per-check aggregation across PDF pages: fail beats pass beats skip beats na.
+  const STATUS_RANK = { fail: 3, pass: 2, skip: 1, na: 0 };
+  function mergeChecks(map, checks, pageIndex) {
+    checks.forEach(function (c) {
+      const tagged = pageIndex
+        ? { id: c.id, n: c.n, label: c.label, status: c.status, detail: "p" + pageIndex + ": " + c.detail, message: c.message }
+        : c;
+      const prev = map.get(c.id);
+      if (!prev || (STATUS_RANK[c.status] || 0) > (STATUS_RANK[prev.status] || 0)) map.set(c.id, tagged);
+    });
+  }
+
   // ---- Phase B: heavy stage -------------------------------------------------
-  async function heavyStage(file, kind, hooks, index) {
-    let checks = [];
+  async function heavyStage(file, cheap, hooks, index) {
+    const kind = cheap.kind;
+    // Seed with the passing cheap-check records (1 size, 2 format, 3 signature)
+    // so they show as ✓ in the details instead of "Not run".
+    const baseChecks = (cheap.checks || []).slice();
     const dec = await decode(file, kind);
-    checks = checks.concat(dec.decodeChecks);
+    const decodeChecks = dec.decodeChecks || [];
     if (dec.failure) {
-      return finalize(file, index, kind, checks, null, null);
+      return finalize(file, index, kind, baseChecks.concat(decodeChecks), null, null);
     }
 
-    if (hooks.stage) hooks.stage(index, "quality");
-    let metrics = null;
-    try {
-      metrics = await global.ReagvisImageQuality.runMetrics(dec.imageData);
-      const qEval = global.ReagvisImageQuality.evaluate(metrics, {
-        isPdf: dec.isPdf,
-        origWidth: dec.origWidth,
-        origHeight: dec.origHeight,
-      });
-      checks = checks.concat(qEval.checks);
-    } catch (err) {
-      // Native pixel math failing is unexpected; degrade rather than block.
-      console.warn("[intake] quality worker failed:", err);
-      checks = checks.concat(qualitySkipped());
+    const frames = dec.frames || [];
+    const agg = new Map(); // check id -> worst result across pages
+    let limited = false;
+    let firstMetrics = null;
+    let firstOcr = null;
+    let page1Blank = null;
+
+    for (let f = 0; f < frames.length; f++) {
+      const frame = frames[f];
+      const tag = frames.length > 1 ? frame.pageIndex : 0;
+
+      if (hooks.stage) hooks.stage(index, "quality");
+      let metrics = null;
+      try {
+        metrics = await global.ReagvisImageQuality.runMetrics(frame.imageData, frame.noiseImageData);
+      } catch (err) {
+        console.warn("[intake] quality worker failed:", err);
+        limited = true;
+      }
+      const qChecks = metrics
+        ? global.ReagvisImageQuality.evaluate(metrics, { isPdf: dec.isPdf, origWidth: frame.origWidth, origHeight: frame.origHeight }).checks
+        : qualitySkipped();
+
+      if (hooks.stage) hooks.stage(index, "readability");
+      let ocr = { skipped: true };
+      try {
+        ocr = await global.ReagvisOcr.runOcr(frame.canvas);
+      } catch (err) {
+        console.warn("[intake] OCR skipped (engine unavailable):", err);
+        ocr = { skipped: true };
+        limited = true;
+      }
+
+      const blankCheck = evaluateBlank(metrics, ocr);
+      const contentRich = metrics ? metrics.inkRatio >= CFG.ocrContentRichInkRatio : false;
+      const ocrCheck = global.ReagvisOcr.evaluate(ocr, blankCheck.status === "fail", contentRich);
+
+      if (f === 0) {
+        firstMetrics = metrics;
+        firstOcr = ocr;
+        page1Blank = blankCheck; // only page 1's blank state counts as "blank doc"
+      }
+      // A blank TRAILING page (back side) is benign — don't let its quality/OCR
+      // checks fail the whole document.
+      if (f > 0 && blankCheck.status === "fail") continue;
+
+      mergeChecks(agg, qChecks, tag); // 7-15
+      mergeChecks(agg, [ocrCheck], tag); // 6
     }
 
-    if (hooks.stage) hooks.stage(index, "readability");
-    let ocr = { skipped: true };
-    try {
-      ocr = await global.ReagvisOcr.runOcr(dec.canvas);
-    } catch (err) {
-      console.warn("[intake] OCR skipped (engine unavailable):", err);
-      ocr = { skipped: true };
-    }
+    if (page1Blank) mergeChecks(agg, [page1Blank], 0); // 16
 
-    const blankCheck = evaluateBlank(metrics, ocr);
-    checks.push(blankCheck);
-    checks.push(global.ReagvisOcr.evaluate(ocr, blankCheck.status === "fail"));
-
-    return finalize(file, index, kind, checks, metrics, ocr);
+    const checks = baseChecks.concat(decodeChecks, Array.from(agg.values()));
+    const result = finalize(file, index, kind, checks, firstMetrics, firstOcr);
+    if (limited) result.limited = true;
+    return result;
   }
 
   // ---- Aggregation ----------------------------------------------------------
@@ -507,19 +678,25 @@
     });
     const allDone = finals.every(Boolean);
     const status = allDone && failed === 0 && total > 0 ? "passed" : "failed";
+    // Degrade-open: if a passing document had a heavy check skipped because an
+    // engine (quality worker / OCR) wasn't available, flag the reduced scrutiny.
+    const limited = finals.some(function (f) {
+      return f && f.status === "pass" && f.limited;
+    });
     let message;
     if (!total) message = "Select a document to begin intake checks.";
     else if (status === "passed")
       message =
-        passed === 1
+        (passed === 1
           ? "Document accepted for forensic analysis."
-          : "All " + passed + " documents accepted for forensic analysis.";
+          : "All " + passed + " documents accepted for forensic analysis.") +
+        (limited ? " (some checks unavailable — backend will re-validate)" : "");
     else
       message =
         failed === 1 && total === 1
           ? "Document rejected — action required."
           : failed + " of " + total + " document(s) rejected — action required.";
-    return { status: status, total: total, passed: passed, failed: failed, message: message, files: finals };
+    return { status: status, total: total, passed: passed, failed: failed, message: message, limited: limited, files: finals };
   }
 
   // ---- Public API -----------------------------------------------------------
@@ -557,7 +734,7 @@
         continue;
       }
       const cheap = cheapResults[i];
-      const res = await heavyStage(list[i], cheap.kind, hooks, i);
+      const res = await heavyStage(list[i], cheap, hooks, i);
       finals[i] = res;
       if (hooks.fileResult) hooks.fileResult(i, res);
     }

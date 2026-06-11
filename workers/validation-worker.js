@@ -40,9 +40,12 @@ self.onmessage = function (e) {
   const msg = e.data || {};
   if (msg.type !== "quality") return;
   try {
-    const metrics = computeMetrics(msg.width, msg.height, msg.buffer);
-    // Transfer the (now metrics-only) result; nothing large to send back, but we
-    // explicitly do NOT send the pixel buffer back to free it promptly.
+    // Noise is measured on an optional NATIVE-resolution crop (msg.noiseBuffer);
+    // if absent, it falls back to the downscaled frame inside computeMetrics.
+    const noise = msg.noiseBuffer
+      ? { buffer: msg.noiseBuffer, width: msg.noiseWidth, height: msg.noiseHeight }
+      : null;
+    const metrics = computeMetrics(msg.width, msg.height, msg.buffer, noise);
     self.postMessage({ type: "quality", id: msg.id, ok: true, metrics: metrics });
   } catch (err) {
     self.postMessage({
@@ -54,10 +57,11 @@ self.onmessage = function (e) {
   }
 };
 
-function computeMetrics(W, H, buffer) {
+function computeMetrics(W, H, buffer, noiseFrame) {
   const data = new Uint8ClampedArray(buffer);
   const N = W * H;
   const gray = new Uint8Array(N);
+  const hist = new Uint32Array(256); // luminance histogram for the p90 highlight
 
   // ---------------- Pass 1: single RGBA sweep ----------------
   // Accumulates: grayscale, mean brightness, ink/very-dark ratios, per-quadrant
@@ -89,6 +93,7 @@ function computeMetrics(W, H, buffer) {
       // choice for these heuristics; do NOT linearize.
       const Y = (0.299 * r + 0.587 * g + 0.114 * b) | 0;
       gray[i] = Y;
+      hist[Y]++;
       sumY += Y;
 
       // Welford online variance of luminance.
@@ -128,6 +133,19 @@ function computeMetrics(W, H, buffer) {
   const shadowUnevenness = Math.max.apply(null, quadMeans) - Math.min.apply(null, quadMeans);
   const glareCenterRatio = centerCount ? blownCenter / centerCount : 0;
 
+  // 90th-percentile luminance — the document's highlights/paper. Used for the
+  // "too dark" test so a dark surround doesn't drag a well-lit doc under.
+  let brightnessP90 = 255;
+  let acc = 0;
+  const p90Target = N * 0.9;
+  for (let t = 0; t < 256; t++) {
+    acc += hist[t];
+    if (acc >= p90Target) {
+      brightnessP90 = t;
+      break;
+    }
+  }
+
   // ---------------- Pass 2: Laplacian neighbourhood ----------------
   // blurVar = variance of the 3x3 Laplacian (kernel [[0,1,0],[1,-4,1],[0,1,0]]).
   // Also counts structural edges globally and in the center box (the latter is
@@ -159,47 +177,25 @@ function computeMetrics(W, H, buffer) {
   const edgeDensityGlobal = lapN ? edgeGlobal / lapN : 0;
   const centerEdgeDensity = centerInterior ? edgeCenter / centerInterior : 0;
 
-  // ---------------- Pass 3: noise in FLAT regions ----------------
-  // Mean local std-dev over 3x3 windows, counting only "flat" windows (small
-  // range) so that text/edges don't inflate the noise estimate. Strided for speed.
-  let noiseSum = 0;
-  let noiseN = 0;
-  for (let y = 1; y < H - 1; y += 2) {
-    for (let x = 1; x < W - 1; x += 2) {
-      let s = 0;
-      let s2 = 0;
-      let mn = 255;
-      let mx = 0;
-      for (let dy = -1; dy <= 1; dy++) {
-        const row = (y + dy) * W + x;
-        for (let dx = -1; dx <= 1; dx++) {
-          const v = gray[row + dx];
-          s += v;
-          s2 += v * v;
-          if (v < mn) mn = v;
-          if (v > mx) mx = v;
-        }
-      }
-      if (mx - mn < FLAT_RANGE) {
-        const lv = s2 / 9 - (s / 9) * (s / 9);
-        noiseSum += Math.sqrt(Math.max(0, lv));
-        noiseN++;
-      }
-    }
-  }
-  const noiseStd = noiseN ? noiseSum / noiseN : 0;
+  // ---------------- Noise (luma + chroma) on the NATIVE crop ----------------
+  // Measured on msg.noiseBuffer (a native-resolution centre crop) so real grain
+  // isn't averaged away by the global downscale. Falls back to the downscaled
+  // RGBA frame when no native crop is supplied (e.g. PDFs).
+  const noise = noiseFrame
+    ? computeNoise(new Uint8ClampedArray(noiseFrame.buffer), noiseFrame.width, noiseFrame.height)
+    : computeNoise(data, W, H);
+  const noiseStd = noise.luma;
+  const chromaNoiseStd = noise.chroma;
 
-  // ---------------- Skew via projection profile ----------------
-  // Only meaningful when there is text (ink) on the page. Binarise (Otsu), then
-  // for each candidate angle build the horizontal row-sum profile of ink pixels
-  // and pick the angle that MAXIMISES the variance of that profile (text rows
-  // align into sharp peaks at the true skew).
-  let skewDeg = 0;
-  let skewReliable = false;
-  if (inkRatio >= 0.01 && inkRatio < 0.6) {
-    skewDeg = estimateSkew(gray, W, H);
-    skewReliable = true;
-  }
+  // ---------------- Skew + gross-rotation via projection profile ----------------
+  // Computed on a CENTRE crop (borders/frames/dark backgrounds otherwise pollute
+  // the ink projections) with a text-like ink gate, so the metric reflects the
+  // actual text lines: fine skew from the row-projection argmax, and a ~90°
+  // rotation when column structure dominates row structure.
+  const orient = analyzeOrientation(gray, W, H);
+  const skewDeg = orient.skewDeg;
+  const skewReliable = orient.reliable;
+  const rotated90 = orient.rotated90;
 
   // ---------------- Screenshot bands ----------------
   // Flatness (variance) of the top and bottom 6% strips — a phone status bar or
@@ -209,14 +205,16 @@ function computeMetrics(W, H, buffer) {
   const botBandVar = bandVariance(gray, W, H, Math.min(H - 1, (H * 0.94) | 0), H);
 
   // ---------------- Occlusion ----------------
-  // Largest connected dark blob at 1/4 resolution (iterative flood fill); flag
-  // when it is both large and overlaps the center.
+  // Largest connected dark blob at 1/4 resolution (iterative flood fill); also
+  // measures the blob's INTERNAL edge density so a solid occluder (finger/object)
+  // can be told apart from detailed dark content (an ID photo, QR, logo).
   const occ = largestDarkBlob(gray, W, H);
 
   return {
     procWidth: W,
     procHeight: H,
     brightness: brightness,
+    brightnessP90: brightnessP90,
     inkRatio: inkRatio,
     veryDarkRatio: veryDarkRatio,
     luminanceVar: luminanceVar,
@@ -227,13 +225,116 @@ function computeMetrics(W, H, buffer) {
     edgeDensityGlobal: edgeDensityGlobal,
     centerEdgeDensity: centerEdgeDensity,
     noiseStd: noiseStd,
+    chromaNoiseStd: chromaNoiseStd,
     skewDeg: skewDeg,
     skewReliable: skewReliable,
+    rotated90: rotated90,
     topBandVar: topBandVar,
     botBandVar: botBandVar,
     occlusionRatio: occ.ratio,
     occlusionCentral: occ.central,
+    occlusionEdgeDensity: occ.internalEdgeDensity,
   };
+}
+
+// Mean local std-dev of luma AND chroma in FLAT 3x3 windows of an RGBA frame.
+// Flat windows (small luma range) exclude text/edges so only sensor grain is
+// measured. Chroma uses cheap Cr=R-Y / Cb=B-Y proxies and catches colour speckle
+// that luma misses. Strided for speed.
+function computeNoise(rgba, W, H) {
+  let lumaSum = 0;
+  let chromaSum = 0;
+  let n = 0;
+  for (let y = 1; y < H - 1; y += 2) {
+    for (let x = 1; x < W - 1; x += 2) {
+      let sY = 0, s2Y = 0, sCr = 0, s2Cr = 0, sCb = 0, s2Cb = 0;
+      let mn = 255, mx = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const p = ((y + dy) * W + (x + dx)) * 4;
+          const r = rgba[p], g = rgba[p + 1], b = rgba[p + 2];
+          const Yv = 0.299 * r + 0.587 * g + 0.114 * b;
+          const cr = r - Yv;
+          const cb = b - Yv;
+          sY += Yv; s2Y += Yv * Yv;
+          sCr += cr; s2Cr += cr * cr;
+          sCb += cb; s2Cb += cb * cb;
+          const yv = Yv | 0;
+          if (yv < mn) mn = yv;
+          if (yv > mx) mx = yv;
+        }
+      }
+      if (mx - mn < FLAT_RANGE) {
+        lumaSum += Math.sqrt(Math.max(0, s2Y / 9 - (sY / 9) * (sY / 9)));
+        const crStd = Math.sqrt(Math.max(0, s2Cr / 9 - (sCr / 9) * (sCr / 9)));
+        const cbStd = Math.sqrt(Math.max(0, s2Cb / 9 - (sCb / 9) * (sCb / 9)));
+        chromaSum += (crStd + cbStd) / 2;
+        n++;
+      }
+    }
+  }
+  return { luma: n ? lumaSum / n : 0, chroma: n ? chromaSum / n : 0 };
+}
+
+// Estimate fine skew and detect a ~90° rotation, on a CENTRE crop so frames and
+// dark backgrounds don't pollute the ink projections. Returns reliable:false
+// when the crop's ink isn't text-like (too little, or a big dark region).
+function analyzeOrientation(gray, W, H) {
+  const m = 0.12; // drop the outer 12% on each side
+  const x0 = (W * m) | 0,
+    x1 = (W * (1 - m)) | 0,
+    y0 = (H * m) | 0,
+    y1 = (H * (1 - m)) | 0;
+  const cw = x1 - x0,
+    ch = y1 - y0;
+  if (cw < 8 || ch < 8) return { skewDeg: 0, rotated90: false, reliable: false };
+
+  const crop = new Uint8Array(cw * ch);
+  for (let y = 0; y < ch; y++) {
+    const src = (y0 + y) * W + x0;
+    for (let x = 0; x < cw; x++) crop[y * cw + x] = gray[src + x];
+  }
+
+  const thr = otsuThreshold(crop, cw * ch);
+  const ink = new Uint8Array(cw * ch);
+  let inkCount = 0;
+  for (let i = 0; i < crop.length; i++) {
+    const v = crop[i] < thr ? 1 : 0;
+    ink[i] = v;
+    inkCount += v;
+  }
+  const inkRatio = inkCount / (cw * ch);
+  // Text-like only: a near-blank crop or a big solid dark region (background,
+  // shadow, occluder) can't give a meaningful skew/rotation estimate.
+  if (inkRatio < 0.01 || inkRatio > 0.35) return { skewDeg: 0, rotated90: false, reliable: false };
+
+  const rowSum = new Float64Array(ch);
+  const colSum = new Float64Array(cw);
+  for (let y = 0; y < ch; y++) {
+    const base = y * cw;
+    for (let x = 0; x < cw; x++) {
+      if (ink[base + x]) {
+        rowSum[y]++;
+        colSum[x]++;
+      }
+    }
+  }
+  // Upright text ⇒ rows alternate text/gap ⇒ rowVar dominates. A genuine ~90°
+  // rotation makes columns dominate by a LARGE factor (real rotations measure
+  // ~20x); the 4x bar clears the residual asymmetry a thin dark border leaves.
+  const rotated90 = variance(colSum) > variance(rowSum) * 4.0;
+  const skewDeg = estimateSkew(crop, cw, ch);
+  return { skewDeg: skewDeg, rotated90: rotated90, reliable: true };
+}
+
+function variance(arr) {
+  let s = 0, s2 = 0;
+  for (let i = 0; i < arr.length; i++) {
+    s += arr[i];
+    s2 += arr[i] * arr[i];
+  }
+  const m = s / arr.length;
+  return s2 / arr.length - m * m;
 }
 
 // Otsu's threshold over a grayscale histogram.
@@ -360,18 +461,20 @@ function largestDarkBlob(gray, W, H) {
   }
   const seen = new Uint8Array(sw * sh);
   const stack = [];
+  const comp = [];
   let biggest = 0;
   let biggestCentral = false;
+  let biggestCells = null;
   for (let start = 0; start < mask.length; start++) {
     if (!mask[start] || seen[start]) continue;
-    let size = 0;
     let central = false;
     stack.length = 0;
+    comp.length = 0;
     stack.push(start);
     seen[start] = 1;
     while (stack.length) {
       const c = stack.pop();
-      size++;
+      comp.push(c);
       const cx = c % sw;
       const cy = (c / sw) | 0;
       if (cx > sw * 0.25 && cx < sw * 0.75 && cy > sh * 0.25 && cy < sh * 0.75) central = true;
@@ -393,10 +496,31 @@ function largestDarkBlob(gray, W, H) {
         stack.push(c + sw);
       }
     }
-    if (size > biggest) {
-      biggest = size;
+    if (comp.length > biggest) {
+      biggest = comp.length;
       biggestCentral = central;
+      biggestCells = comp.slice();
     }
   }
-  return { ratio: biggest / mask.length, central: biggestCentral };
+
+  // Internal edge density of the biggest blob, sampled at full resolution: a
+  // SOLID occluder (finger/object) has few internal edges; detailed content (an
+  // ID photo, QR, logo) has many — letting the caller spare such content.
+  let internalEdgeDensity = 0;
+  if (biggestCells && biggestCells.length) {
+    let edges = 0;
+    let checked = 0;
+    for (let j = 0; j < biggestCells.length; j++) {
+      const cx = (biggestCells[j] % sw) * 4;
+      const cy = ((biggestCells[j] / sw) | 0) * 4;
+      if (cx < 1 || cy < 1 || cx >= W - 1 || cy >= H - 1) continue;
+      const i = cy * W + cx;
+      const lap = gray[i - W] + gray[i + W] + gray[i - 1] + gray[i + 1] - 4 * gray[i];
+      if ((lap < 0 ? -lap : lap) >= EDGE_LAP) edges++;
+      checked++;
+    }
+    if (checked) internalEdgeDensity = edges / checked;
+  }
+
+  return { ratio: biggest / mask.length, central: biggestCentral, internalEdgeDensity: internalEdgeDensity };
 }

@@ -62,10 +62,10 @@
     return worker;
   }
 
-  // Compute raw metrics for an ImageData frame. TRANSFERS the pixel buffer to the
-  // worker (zero-copy); the passed ImageData is detached afterwards and must not
-  // be reused by the caller.
-  function runMetrics(imageData) {
+  // Compute raw metrics for an ImageData frame. TRANSFERS the pixel buffer(s) to
+  // the worker (zero-copy); the passed ImageData (and optional native-resolution
+  // noiseImageData) are detached afterwards and must not be reused by the caller.
+  function runMetrics(imageData, noiseImageData) {
     return new Promise(function (resolve, reject) {
       let w;
       try {
@@ -93,11 +93,16 @@
         },
       });
       const buffer = imageData.data.buffer;
+      const msg = { type: "quality", id: id, width: imageData.width, height: imageData.height, buffer: buffer };
+      const transfer = [buffer];
+      if (noiseImageData && noiseImageData.data.buffer !== buffer) {
+        msg.noiseBuffer = noiseImageData.data.buffer;
+        msg.noiseWidth = noiseImageData.width;
+        msg.noiseHeight = noiseImageData.height;
+        transfer.push(noiseImageData.data.buffer);
+      }
       try {
-        w.postMessage(
-          { type: "quality", id: id, width: imageData.width, height: imageData.height, buffer: buffer },
-          [buffer]
-        );
+        w.postMessage(msg, transfer);
       } catch (err) {
         // postMessage can throw (e.g. detached buffer); reject rather than hang.
         const r = pending.get(id);
@@ -121,9 +126,11 @@
     return Math.round((longPx / 11.69 + shortPx / 8.27) / 2);
   }
 
-  // Conservative screenshot aspect-ratio set. 4:3 is deliberately EXCLUDED: it is
-  // far too common for genuine document scans/photos to use as a fail signal.
-  const SCREEN_RATIOS = [16 / 9, 18 / 9, 19.5 / 9, 20 / 9];
+  // Conservative screenshot aspect-ratio set — only the TALL phone-screen ratios.
+  // 4:3 AND 16:9 are deliberately EXCLUDED: both are far too common for genuine
+  // document scans/photos (a 16:9 landscape doc with plain top/bottom margins
+  // would otherwise false-trip as a screenshot).
+  const SCREEN_RATIOS = [18 / 9, 19.5 / 9, 20 / 9];
   function aspectLooksLikeScreen(origW, origH) {
     const a = origW / origH;
     const inv = origH / origW;
@@ -171,9 +178,11 @@
       add("blur", 7, "Blur / focus", "pass", "Focus score " + r2(metrics.blurVar));
     }
 
-    // 8 — Shadow / uneven lighting.
+    // 8 — Shadow / uneven lighting. Conservative: requires BOTH a large very-dark
+    // area AND strong quadrant unevenness, so a single dark element (ID photo,
+    // dark logo, QR) or a dark background doesn't trigger a false shadow reject.
     const shadowBad =
-      metrics.veryDarkRatio > CFG.maxShadowAreaRatio || metrics.shadowUnevenness > CFG.maxShadowUnevenness;
+      metrics.veryDarkRatio > CFG.maxShadowAreaRatio && metrics.shadowUnevenness > CFG.maxShadowUnevenness;
     add(
       "shadow",
       8,
@@ -208,7 +217,10 @@
         : undefined
     );
 
-    // 10 — DPI / resolution. IMAGES ONLY (PDFs are vector-rasterised by us).
+    // 10 — Resolution. IMAGES ONLY (PDFs are vector-rasterised by us). The pass/
+    // fail uses ACTUAL pixel dimensions only — the DPI number is an unreliable
+    // guess (it assumes the frame is exactly an A4 page) so it's shown for
+    // context but never used to reject.
     if (isPdf) {
       add("resolution", 10, "DPI / resolution", "na", "Not applicable (PDF is rendered at a fixed scale).");
     } else {
@@ -216,24 +228,34 @@
       const minDim = Math.min(ow, oh);
       const maxDim = Math.max(ow, oh);
       const tooSmall = minDim < CFG.minImageWidth || maxDim < CFG.minImageHeight;
-      const lowDpi = dpi < CFG.minEstimatedDpi;
-      if (tooSmall || lowDpi) {
+      const detail = ow + "x" + oh + "px (~" + dpi + " dpi est.)";
+      if (tooSmall) {
         add(
           "resolution",
           10,
           "DPI / resolution",
           "fail",
-          ow + "x" + oh + "px, ~" + dpi + " dpi",
+          detail,
           "This image's resolution is too low for reliable forensic analysis. Please upload a higher-resolution scan or photo."
         );
       } else {
-        add("resolution", 10, "DPI / resolution", "pass", ow + "x" + oh + "px, ~" + dpi + " dpi");
+        add("resolution", 10, "DPI / resolution", "pass", detail);
       }
     }
 
-    // 11 — Skew / rotation.
+    // 11 — Skew / rotation. Detect both a ~90° rotation (text runs sideways) and
+    // fine tilt, with a message that matches the actual problem.
     if (!metrics.skewReliable) {
       add("skew", 11, "Skew / rotation", "skip", "Skipped (not enough text lines to estimate skew).");
+    } else if (metrics.rotated90) {
+      add(
+        "skew",
+        11,
+        "Skew / rotation",
+        "fail",
+        "Text appears sideways (~90° rotation)",
+        "This document looks rotated sideways. Please rotate it upright and re-upload."
+      );
     } else if (Math.abs(metrics.skewDeg) > CFG.maxSkewDegrees) {
       add(
         "skew",
@@ -241,18 +263,19 @@
         "Skew / rotation",
         "fail",
         "Estimated skew " + r2(metrics.skewDeg) + "°",
-        "The document is too tilted or rotated for reliable analysis. Please straighten it and retake."
+        "The document is too tilted for reliable analysis. Please straighten it and retake."
       );
     } else {
       add("skew", 11, "Skew / rotation", "pass", "Estimated skew " + r2(metrics.skewDeg) + "°");
     }
 
-    // 12 — Brightness (two-sided). The "too bright" side is gated on low edge
-    // content so a clean white scan with crisp text (bright background, but lots
-    // of structure) is not mistaken for an overexposed/washed-out capture.
+    // 12 — Brightness. "Too dark" uses the 90th-percentile luminance (the
+    // document's highlights), so a doc on a dark surface isn't falsely rejected.
+    // "Too bright" uses the mean and is gated on low edge content, so a clean
+    // white scan with crisp text isn't mistaken for overexposed.
     const brightDetail =
-      "Mean luminance " + r2(metrics.brightness) + ", edges " + (metrics.edgeDensityGlobal * 100).toFixed(1) + "%";
-    if (metrics.brightness < CFG.minBrightness) {
+      "p90 " + r2(metrics.brightnessP90) + ", mean " + r2(metrics.brightness) + ", edges " + (metrics.edgeDensityGlobal * 100).toFixed(1) + "%";
+    if (metrics.brightnessP90 < CFG.minBrightnessHighlight) {
       add(
         "brightness",
         12,
@@ -274,18 +297,22 @@
       add("brightness", 12, "Brightness", "pass", brightDetail);
     }
 
-    // 13 — Noise / grain (severe only).
-    if (metrics.noiseStd > CFG.maxNoiseStd) {
+    // 13 — Noise / grain (severe only). Native-resolution luma OR chroma noise;
+    // chroma catches colour speckle (common in low-light photos) that luma misses.
+    const chroma = metrics.chromaNoiseStd || 0;
+    const noiseBad = metrics.noiseStd > CFG.maxNoiseStd || chroma > CFG.maxChromaNoiseStd;
+    const noiseDetail = "luma " + r2(metrics.noiseStd) + ", chroma " + r2(chroma);
+    if (noiseBad) {
       add(
         "noise",
         13,
         "Noise / grain",
         "fail",
-        "Flat-region noise " + r2(metrics.noiseStd),
+        noiseDetail,
         "This image is too noisy or grainy for reliable analysis. Please upload a cleaner scan."
       );
     } else {
-      add("noise", 13, "Noise / grain", "pass", "Flat-region noise " + r2(metrics.noiseStd));
+      add("noise", 13, "Noise / grain", "pass", noiseDetail);
     }
 
     // 14 — Screenshot. IMAGES ONLY, conservative (aspect ratio of a screen AND a
@@ -313,14 +340,26 @@
       }
     }
 
-    // 15 — Occlusion (large central dark blob).
-    const occBad = metrics.occlusionRatio > CFG.maxOcclusionAreaRatio && metrics.occlusionCentral;
+    // 15 — Occlusion (large, central, SOLID dark blob). The solidity guard (low
+    // internal edge density) is what spares legitimate dark-but-detailed content
+    // (ID photo, QR, stamp, logo), which has high internal texture.
+    const occEdge = metrics.occlusionEdgeDensity || 0;
+    const occBad =
+      metrics.occlusionRatio > CFG.maxOcclusionAreaRatio &&
+      metrics.occlusionCentral &&
+      occEdge < CFG.occlusionMaxInternalEdgeDensity;
     add(
       "occlusion",
       15,
       "Occlusion",
       occBad ? "fail" : "pass",
-      "Largest dark blob " + (metrics.occlusionRatio * 100).toFixed(1) + "%" + (metrics.occlusionCentral ? " (central)" : ""),
+      "Largest blob " +
+        (metrics.occlusionRatio * 100).toFixed(1) +
+        "%" +
+        (metrics.occlusionCentral ? " central" : "") +
+        ", internal edges " +
+        (occEdge * 100).toFixed(1) +
+        "%",
       occBad
         ? "Part of the document is covered or obstructed. Please retake it with the full page visible."
         : undefined

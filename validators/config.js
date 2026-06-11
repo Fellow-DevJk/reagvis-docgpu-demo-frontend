@@ -35,22 +35,53 @@
     allowedExtensions: ["pdf", "jpg", "jpeg", "png"],
 
     // ---------- Readability (OCR) ----------
-    minOcrConfidence: 55, // Tesseract page confidence (0..100); below ⇒ unreadable
-    minOcrTextLength: 20, // characters of recognised text; below ⇒ unreadable/blank
+    // NOTE: Tesseract's page `confidence` is noisy/pessimistic on real-world
+    // photos — it routinely reports 25-35 even when the text is fully legible and
+    // hundreds of characters are extracted. So confidence is treated as a SOFT
+    // signal: it only fails a document whose recognised text is also SHORT. Once
+    // a document yields plenty of text (>= ocrAmpleTextLength) it is considered
+    // readable regardless of the confidence number.
+    minOcrConfidence: 45, // only applies when extracted text is short
+    minOcrTextLength: 20, // below ⇒ effectively no readable text
+    ocrAmpleTextLength: 80, // at/above this many chars ⇒ readable, ignore low confidence
+    // OCR languages passed to Tesseract (space/plus separated, e.g. "eng+hin").
+    // English-only OCR falsely rejects non-Latin documents — so add the scripts
+    // you expect (Indian KYC: "eng+hin"), at the cost of a larger one-time data
+    // download. Separately, a page that LOOKS like a document (plenty of ink/
+    // structure) but yields little OCR text is treated as "can't assess" (skip),
+    // NOT rejected — it is most likely a script we didn't load.
+    ocrLanguages: "eng+hin",
+    ocrContentRichInkRatio: 0.03, // ink ratio above which low-OCR ⇒ skip, not fail
+
+    // ---------- Decode safety ----------
+    // Reject absurd pixel dimensions BEFORE allocating a full-frame bitmap — a
+    // 25000x25000 "image" decompresses to gigabytes and can crash the tab
+    // (decompression bomb). 40 MP comfortably covers any real document scan/photo.
+    maxImagePixels: 40 * 1000 * 1000,
+    // PDFs: how many leading pages to actually validate (not just page 1). The
+    // file fails if ANY checked page fails. Keep small for speed.
+    pdfPagesToValidate: 2,
 
     // ---------- Image-quality (computed on the downscaled grayscale image) ----------
     // Pixel metrics are normalised by first downscaling the longest side to this
     // many pixels. Keeps thresholds stable across 2MP and 48MP inputs and
     // suppresses sensor noise that would otherwise fool the blur metric.
     downscaleLongSide: 1000,
+    // Noise is the exception: it is measured on a NATIVE-resolution centre crop
+    // (this many px max per side) because the downscale above averages real grain
+    // away and hides it. See maxNoiseStd / maxChromaNoiseStd below.
+    noiseCropMaxSide: 900,
 
     // Resolution / DPI — evaluated on the ORIGINAL pixel dimensions, IMAGES ONLY.
     // (PDFs are rasterised by us at a fixed scale, so DPI is not meaningful there.)
     // Enforced orientation-independently: short side vs minImageWidth, long side
     // vs minImageHeight.
-    minImageWidth: 1000,
-    minImageHeight: 1400,
-    minEstimatedDpi: 150, // assuming the image frames a full A4 page
+    // Lowered from 1000x1400 / 150dpi: those rejected plenty of legible phone
+    // photos / screenshots of documents. These are a loose floor to catch only
+    // genuine thumbnails; real readability is governed by the OCR check. [tune]
+    minImageWidth: 500, // short side
+    minImageHeight: 700, // long side
+    minEstimatedDpi: 60, // assuming the image frames a full A4 page
 
     // Focus / blur — variance of the Laplacian. LOWER = blurrier.
     minBlurScore: 100, // [DEMO — tune] sharp scans are typically > 300
@@ -61,8 +92,12 @@
     // over-rejects clean white scans, so it is raised to 248 here to catch only
     // genuinely blown-out captures. Truly blank white pages are caught by the
     // dedicated blank-page check instead. [DEMO — tune]
-    minBrightness: 45, // below ⇒ too dark
     maxBrightness: 248, // above ⇒ blown out / overexposed
+    // "Too dark" is judged on the 90th-percentile luminance (the document's
+    // highlights / paper), NOT the global mean — so a document photographed on a
+    // dark desk/background isn't falsely rejected just because the surround is
+    // dark. If even the brightest ~10% of the frame is dim, it is underexposed.
+    minBrightnessHighlight: 90, // p90 luminance below this ⇒ too dark
     // "Overexposed" only fires when the page ALSO has almost no edge structure —
     // otherwise a clean white scan with crisp text (lots of edges) is wrongly
     // rejected just for having a bright background.
@@ -74,22 +109,30 @@
     maxGlareAreaRatio: 0.15, // [DEMO — tune] fraction of center that is blown
     glareMaxCenterEdgeDensity: 0.02, // glare only if center has little text/structure
 
-    // Shadow / uneven lighting.
-    maxShadowAreaRatio: 0.1, // [DEMO — tune] fraction of very-dark pixels
-    maxShadowUnevenness: 70, // max-min of the four quadrant mean luminances
+    // Shadow / uneven lighting. Conservative: requires BOTH a large very-dark
+    // area AND strong quadrant unevenness, so a single dark element (an ID photo,
+    // dark logo/banner, QR block) or a dark background doesn't trip a false
+    // "shadow" rejection — only genuinely uneven illumination does.
+    maxShadowAreaRatio: 0.1, // fraction of very-dark pixels
+    maxShadowUnevenness: 95, // max-min of the four quadrant mean luminances [tune]
 
-    // Noise / grain — mean local std-dev measured in FLAT regions only (so text
-    // edges don't inflate it), AFTER the ~1000px downscale (which itself averages
-    // out a lot of noise). HIGHER = grainier. Fail only on severe noise: clean
-    // scans read ~1, mild real noise ~8, heavy grain ~14+. [DEMO — tune]
-    maxNoiseStd: 12,
+    // Noise / grain — mean local std-dev in FLAT regions of a NATIVE-resolution
+    // centre crop (the global downscale averages real grain away, so noise must be
+    // measured before it). Measured for luma AND chroma; chroma catches colour
+    // speckle that luma misses. Clean scans read luma ~0.6 / chroma ~0; heavy grain
+    // 20+. Fail only on clearly bad grain. [DEMO — tune on real samples]
+    maxNoiseStd: 7, // native-resolution luma flat-region std
+    maxChromaNoiseStd: 8, // native-resolution chroma flat-region std
 
     // Skew / rotation — estimated text-line tilt in degrees.
     maxSkewDegrees: 12, // |skew| above this ⇒ too rotated
 
-    // Occlusion — a large dark blob covering the central document area
-    // (finger/hand over the page, object on top, torn corner, etc.).
+    // Occlusion — a large, SOLID (low internal texture) blob over the central
+    // document area: a finger/hand/object on the page. The solidity guard is what
+    // separates an occluder from legitimate dark-but-detailed content (an ID
+    // photo, QR code, stamp or logo), which has high internal edge density.
     maxOcclusionAreaRatio: 0.15, // [DEMO — tune] severe occlusion only
+    occlusionMaxInternalEdgeDensity: 0.04, // blob is an occluder only if this "solid"
 
     // Screenshot — heuristic confidence score (0..1). Deliberately conservative
     // so only OBVIOUS screen captures fail (aspect ratio of a phone/desktop

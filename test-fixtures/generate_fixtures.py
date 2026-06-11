@@ -122,6 +122,42 @@ def make_pass():
          os.path.join(PASS_DIR, "doc-clean.pdf"),
          format="PDF",
          resolution=150.0)
+
+    # Benign rename: real PNG bytes with a .jpg extension — must PASS (routed by
+    # content signature, not extension).
+    save(base, os.path.join(PASS_DIR, "doc-clean-as.jpg-but-png.png"))
+    shutil.move(os.path.join(PASS_DIR, "doc-clean-as.jpg-but-png.png"),
+                os.path.join(PASS_DIR, "doc-rename-pngbytes.jpg"))
+    print("  wrote should-pass/doc-rename-pngbytes.jpg (PNG bytes, .jpg ext)")
+
+    # Document photographed on a DARK background — must PASS (brightness now uses
+    # the p90 highlight, so the dark surround doesn't drag it under).
+    darkbg = Image.new("RGB", (A4_W, A4_H), (35, 35, 38))
+    inner = render_document(w=900,
+                            h=1300,
+                            lines=SAMPLE_LINES,
+                            size=24,
+                            margin=60)
+    darkbg.paste(inner, ((A4_W - 900) // 2, (A4_H - 1300) // 2))
+    save(darkbg, os.path.join(PASS_DIR, "doc-on-dark-background.png"))
+
+    # Document with a DETAILED dark element (QR-like block) over the centre — must
+    # PASS (occlusion now spares high-internal-texture content).
+    idphoto = render_document(lines=SAMPLE_LINES, size=24).copy()
+    qd = ImageDraw.Draw(idphoto)
+    qx, qy, qs = A4_W // 2 - 220, A4_H // 2 - 220, 440
+    rng = np.random.RandomState(3)
+    cells = 22
+    cell = qs // cells
+    for iy in range(cells):
+        for ix in range(cells):
+            if rng.rand() < 0.5:
+                qd.rectangle([
+                    qx + ix * cell, qy + iy * cell, qx + (ix + 1) * cell, qy +
+                    (iy + 1) * cell
+                ],
+                             fill=(20, 20, 20))
+    save(idphoto, os.path.join(PASS_DIR, "doc-with-qr-block.png"))
     return base
 
 
@@ -160,12 +196,14 @@ def make_fail(base):
         y += 24
     save(glare, os.path.join(FAIL_DIR, "fail-glare.png"))
 
-    # 8 Shadow / uneven lighting — left third heavily darkened (quadrant
-    # unevenness), right side normal.
+    # 8 Shadow / uneven lighting — left ~30% in deep shadow (near-black) fading to
+    # normal. Needs BOTH a large very-dark area AND strong quadrant unevenness now.
     sh = np.asarray(base, dtype=np.float32).copy()
-    grad = np.ones(sh.shape[1], dtype=np.float32)
-    third = sh.shape[1] // 2
-    grad[:third] = np.linspace(0.12, 1.0, third)
+    W = sh.shape[1]
+    grad = np.ones(W, dtype=np.float32)
+    d = int(W * 0.30)
+    grad[:d] = 0.06
+    grad[d:W // 2] = np.linspace(0.06, 1.0, W // 2 - d)
     sh *= grad[None, :, None]
     shadow = Image.fromarray(np.clip(sh, 0, 255).astype(np.uint8))
     save(shadow, os.path.join(FAIL_DIR, "fail-shadow.png"))
@@ -174,12 +212,31 @@ def make_fail(base):
     # background so the noise isn't clipped to white; flat-region std then reads
     # ~the true sigma. (Pure-white pages clip noise and mute the metric.)
     graybg = render_document(bg=205, fg=25)
-    # sigma 40 survives the ~1000px downscale (which averages noise down) to a
-    # flat-region std of ~14, above the maxNoiseStd=12 gate.
+    # Noise is now measured on a NATIVE-resolution crop (no downscale denoise), so
+    # sigma 40 reads ~22 luma / ~34 chroma — well above the gates.
     arr = np.asarray(graybg, dtype=np.float32) + np.random.normal(
         0, 40, (A4_H, A4_W, 3))
     noisy = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
     save(noisy, os.path.join(FAIL_DIR, "fail-noise.png"))
+
+    # 13b CHROMA noise — colour speckle with LOW luma noise (noise on R & B only,
+    # G clean). Tests the chroma path: luma stays under the luma gate but chroma
+    # exceeds the chroma gate.
+    arr = np.asarray(graybg, dtype=np.float32).copy()
+    n = np.random.normal(0, 20, (A4_H, A4_W))
+    arr[..., 0] += n  # R
+    arr[..., 2] -= n  # B (opposite ⇒ chroma, minimal luma)
+    chroma = Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
+    save(chroma, os.path.join(FAIL_DIR, "fail-chroma-noise.png"))
+
+    # 11b Sideways (~90 deg) rotation — should FAIL with the "rotate upright" msg.
+    rot90 = base.rotate(90, expand=True, fillcolor=(255, 255, 255))
+    save(rot90, os.path.join(FAIL_DIR, "fail-rotated90.png"))
+
+    # 1b Oversized pixel dimensions (decompression-bomb guard) — 7000x6000 = 42 MP
+    # > 40 MP cap. Solid page compresses tiny on disk but decodes huge.
+    big = render_document(w=7000, h=6000, size=120, margin=200)
+    save(big, os.path.join(FAIL_DIR, "fail-oversized-dimensions.png"))
 
     # 11 Skew — strongly rotated (~22 deg).
     sk = base.rotate(-22,
@@ -189,7 +246,7 @@ def make_fail(base):
     save(sk, os.path.join(FAIL_DIR, "fail-skew.png"))
 
     # 10 DPI / resolution — too small.
-    low = render_document(w=600, h=850, size=15, margin=40)
+    low = render_document(w=360, h=500, size=11, margin=22)
     save(low, os.path.join(FAIL_DIR, "fail-low-res.png"))
 
     # 16 Blank page — pure white.
@@ -228,12 +285,16 @@ def make_fail(base):
         small.save(os.path.join(FAIL_DIR, "fail-unsupported." + ext))
         print("  wrote should-fail/fail-unsupported." + ext)
 
-    # 3 Extension vs signature — PNG bytes named .pdf, and text named .png.
-    base.save(os.path.join(FAIL_DIR,
-                           "fail-png-bytes.pdf-renamed.png"))  # helper
-    shutil.move(os.path.join(FAIL_DIR, "fail-png-bytes.pdf-renamed.png"),
-                os.path.join(FAIL_DIR, "fail-mime-png-as-pdf.pdf"))
-    print("  wrote should-fail/fail-mime-png-as-pdf.pdf (PNG bytes, .pdf ext)")
+    # 3 Extension vs signature — unrecognised binary named .pdf (not a real
+    # PDF/JPG/PNG). A benign rename like PNG-bytes-named-.jpg is NOW accepted
+    # (routed by content, see should-pass/doc-rename-pngbytes.jpg); only content
+    # that isn't a supported type at all is rejected here.
+    with open(os.path.join(FAIL_DIR, "fail-unrecognized-content.pdf"),
+              "wb") as fh:
+        fh.write(b"NOTADOC\x00random binary that is not pdf/jpg/png. " * 40)
+    print(
+        "  wrote should-fail/fail-unrecognized-content.pdf (not a supported type)"
+    )
     with open(os.path.join(FAIL_DIR, "fail-mime-text-as-png.png"), "w") as fh:
         # Pad above the 1 KB size floor so this trips the SIGNATURE check (its
         # purpose), not the size check.

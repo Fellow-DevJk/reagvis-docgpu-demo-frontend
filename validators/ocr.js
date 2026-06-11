@@ -34,8 +34,9 @@
     if (typeof global.Tesseract === "undefined" || !global.Tesseract.createWorker) {
       return Promise.reject(new Error("Tesseract.js is not loaded"));
     }
-    // v5+/v7 API: createWorker is async and pre-loads the language directly.
-    workerPromise = global.Tesseract.createWorker("eng").catch(function (err) {
+    // v5+/v7 API: createWorker is async and pre-loads the language(s) directly.
+    // Languages are configurable (e.g. "eng+hin") so non-Latin documents read.
+    workerPromise = global.Tesseract.createWorker(CFG.ocrLanguages || "eng").catch(function (err) {
       // Reset so a later attempt can retry rather than reusing a failed promise.
       workerPromise = null;
       throw err;
@@ -60,9 +61,12 @@
   }
 
   // Build check 6 (OCR readability) from an OCR result, honouring config
-  // thresholds. `blankSuspected` lets the orchestrator suppress a redundant
-  // "unreadable" message when the dedicated blank-page check already fired.
-  function evaluate(ocr, blankSuspected) {
+  // thresholds. `blankSuspected` suppresses a redundant "unreadable" message when
+  // the blank-page check already fired. `contentRich` (the page has plenty of
+  // ink/structure) means a low-OCR result is most likely a script we didn't load,
+  // so we SKIP rather than reject — English-only OCR must not falsely reject a
+  // non-Latin document.
+  function evaluate(ocr, blankSuspected, contentRich) {
     if (!ocr || ocr.skipped) {
       return {
         id: "ocr",
@@ -72,10 +76,25 @@
         detail: "Skipped (OCR engine unavailable — backend will re-check).",
       };
     }
-    const lowConfidence = ocr.confidence < CFG.minOcrConfidence;
     const tooLittleText = ocr.textLength < CFG.minOcrTextLength;
+    const ampleText = ocr.textLength >= CFG.ocrAmpleTextLength;
+    // Confidence only matters when the text is NOT already ample — Tesseract's
+    // confidence is unreliable on real photos, so plenty of extracted text means
+    // the document is readable even at a low confidence score.
+    const lowConfidence = !ampleText && ocr.confidence < CFG.minOcrConfidence;
+    const unreadable = tooLittleText || lowConfidence;
     const detail = "confidence " + Math.round(ocr.confidence) + ", text " + ocr.textLength + " chars";
-    if ((lowConfidence || tooLittleText) && !blankSuspected) {
+
+    if (unreadable && contentRich) {
+      return {
+        id: "ocr",
+        n: 6,
+        label: "OCR readability",
+        status: "skip",
+        detail: detail + " (content-rich but low OCR — possibly a script not loaded)",
+      };
+    }
+    if (unreadable && !blankSuspected) {
       return {
         id: "ocr",
         n: 6,
@@ -89,7 +108,7 @@
       id: "ocr",
       n: 6,
       label: "OCR readability",
-      status: lowConfidence || tooLittleText ? "skip" : "pass",
+      status: unreadable ? "skip" : "pass",
       detail: detail,
     };
   }

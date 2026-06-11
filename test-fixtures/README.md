@@ -29,35 +29,43 @@ and PDF encryption are browser-only and are reported as `BROWSER-ONLY`.)
 | `doc-dense-text.png` | Text-dense page |
 | `doc-mild-skew.png` | ~4° tilt — below the 12° fail threshold |
 | `doc-clean.pdf` | Valid PDF (PDF.js renders page 1; OCR reads the text) |
+| `doc-rename-pngbytes.jpg` | **Benign rename** — real PNG bytes, `.jpg` ext (routed by content) |
+| `doc-on-dark-background.png` | Document shot on a **dark surface** (brightness uses p90 highlight) |
+| `doc-with-qr-block.png` | Dark **QR/detailed block** over centre (occlusion spares detailed content) |
 
 ## should-fail (Rejected) — one per check
 
 | File | Check (#) | Expected message family |
 |------|-----------|-------------------------|
 | `fail-tiny.png` | File size (1) | empty / truncated |
+| `fail-oversized-dimensions.png` | File size (1) | pixel dimensions too large (bomb guard) |
 | `fail-unsupported.gif` / `.bmp` / `.webp` | Allowed format (2) | unsupported file type |
-| `fail-mime-text-as-png.png` | Extension vs signature (3) | contents don't match extension |
-| `fail-mime-png-as-pdf.pdf` | Extension vs signature (3) | contents don't match extension |
-| `fail-corrupt.png` / `fail-corrupt.jpg` | Corruption (4) | corrupted image |
+| `fail-mime-text-as-png.png` | Extension vs signature (3) | content isn't a supported type |
+| `fail-unrecognized-content.pdf` | Extension vs signature (3) | content isn't a supported type |
+| `fail-corrupt.png` / `fail-corrupt.jpg` | Corruption (4) | corrupted / truncated image |
 | `fail-corrupt.pdf` | Corruption (4) | corrupted PDF *(browser)* |
 | `fail-password.pdf` | Password (5) | password protected *(browser; user pw `secret4242`)* |
 | `fail-blur.png` | Blur (7) | too blurry |
 | `fail-shadow.png` | Shadow/lighting (8) | uneven lighting / shadow |
 | `fail-glare.png` | Glare (9) | severe glare over content |
-| `fail-low-res.png` | DPI/resolution (10) | resolution too low |
-| `fail-skew.png` | Skew (11) | too tilted/rotated (~22°) |
+| `fail-low-res.png` | Resolution (10) | resolution too low |
+| `fail-skew.png` | Skew (11) | too tilted (~22°) |
+| `fail-rotated90.png` | Skew (11) | rotated sideways (~90°) — "rotate upright" |
 | `fail-too-dark.png` | Brightness (12) | too dark |
 | `fail-overexposed.png` | Brightness/Blank (12/16) | overexposed → reads near-blank |
-| `fail-noise.png` | Noise (13) | too noisy/grainy |
+| `fail-noise.png` | Noise (13) | too noisy/grainy (luma) |
+| `fail-chroma-noise.png` | Noise (13) | colour speckle (chroma path, low luma) |
 | `fail-screenshot.png` | Screenshot (14) | looks like a screen capture |
-| `fail-occlusion.png` | Occlusion (15) | document is covered/obstructed |
+| `fail-occlusion.png` | Occlusion (15) | document covered by a solid object |
 | `fail-blank.png` | Blank page (16) | page appears blank |
 
 Notes:
 - When several checks fail, the **headline** message follows the priority order in
-  `document-intake.js` (e.g. `fail-overexposed.png` legitimately reads as *blank*,
-  since a washed-out page has almost no recoverable content).
-- Thresholds live in `validators/config.js`; the ones marked `[DEMO — tune]` are
-  the most likely to need calibration on your real intake samples.
-- The `should-fail` heavy fixtures (`fail-noise.png`) are large because noise is
-  incompressible — that's expected.
+  `document-intake.js` (e.g. `fail-overexposed.png` legitimately reads as *blank*).
+- Noise is measured on a **native-resolution crop** (the global downscale hides
+  grain) for both luma and chroma; brightness "too dark" uses the **p90 highlight**;
+  skew/rotation is computed on a **centre crop** (so frames/dark backgrounds don't
+  pollute it); occlusion is gated on **solidity** (detailed dark content passes).
+- Thresholds live in `validators/config.js`; ones marked `[DEMO — tune]` most need
+  calibration on real samples. `fail-noise.png` is large because noise is
+  incompressible — expected.
