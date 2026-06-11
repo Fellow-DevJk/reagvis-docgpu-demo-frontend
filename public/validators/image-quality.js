@@ -1,0 +1,346 @@
+/*
+ * validators/image-quality.js
+ * ---------------------------
+ * Main-thread side of the image-quality checks. It owns ONE shared compute
+ * worker (workers/validation-worker.js), ships it a downscaled RGBA frame, and
+ * turns the raw metrics it returns into PASS/FAIL check results using the
+ * thresholds in VALIDATION_CONFIG.
+ *
+ * Checks owned here (see the canonical 16-point list):
+ *   7 Blur · 8 Shadow/lighting · 9 Glare · 10 DPI/resolution · 11 Skew ·
+ *   12 Brightness · 13 Noise · 14 Screenshot · 15 Occlusion
+ * It also returns the raw blank-page signals (ink ratio + luminance variance);
+ * the orchestrator combines those with OCR to finalise check 16 (blank page).
+ *
+ * Threshold decisions live HERE, not in the worker, so config.js is the single
+ * source of truth and the worker needs no importScripts().
+ */
+
+(function (global) {
+  "use strict";
+
+  const CFG = global.VALIDATION_CONFIG;
+
+  // Safety net: a worker reply that never arrives (dropped message, dead worker)
+  // must not hang the whole batch — runMetrics rejects after this and the
+  // orchestrator degrades that file's quality checks to "skip".
+  const QUALITY_TIMEOUT_MS = 20000;
+
+  // --- Shared worker (lazy, reused across all files in the session) ----------
+  let worker = null;
+  let seq = 0;
+  const pending = new Map();
+
+  function getWorker() {
+    if (worker) return worker;
+    // Resolve relative to the page (document.baseURI) so it works under a subpath
+    // host. A classic worker from a same-origin URL is allowed on static hosting.
+    const url = new global.URL("workers/validation-worker.js", global.document.baseURI);
+    worker = new global.Worker(url);
+    worker.onmessage = function (e) {
+      const msg = e.data || {};
+      const resolver = pending.get(msg.id);
+      if (!resolver) return;
+      pending.delete(msg.id);
+      if (msg.ok) resolver.resolve(msg.metrics);
+      else resolver.reject(new Error(msg.error || "quality worker failed"));
+    };
+    worker.onerror = function (err) {
+      // A hard worker error (e.g. the worker script failed to load) rejects all
+      // in-flight work AND tears down the worker, so the next runMetrics() rebuilds
+      // it instead of reusing a dead one (which would otherwise hang forever).
+      const e = new Error("validation worker error: " + (err.message || "unknown"));
+      try {
+        if (worker) worker.terminate();
+      } catch (_) {
+        /* ignore */
+      }
+      worker = null;
+      pending.forEach((r) => r.reject(e));
+      pending.clear();
+    };
+    return worker;
+  }
+
+  // Compute raw metrics for an ImageData frame. TRANSFERS the pixel buffer to the
+  // worker (zero-copy); the passed ImageData is detached afterwards and must not
+  // be reused by the caller.
+  function runMetrics(imageData) {
+    return new Promise(function (resolve, reject) {
+      let w;
+      try {
+        w = getWorker();
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      const id = ++seq;
+      const timer = global.setTimeout(function () {
+        if (pending.has(id)) {
+          pending.delete(id);
+          reject(new Error("quality worker timed out"));
+        }
+      }, QUALITY_TIMEOUT_MS);
+      // Wrap settle handlers so the timeout is always cleared.
+      pending.set(id, {
+        resolve: function (v) {
+          global.clearTimeout(timer);
+          resolve(v);
+        },
+        reject: function (e) {
+          global.clearTimeout(timer);
+          reject(e);
+        },
+      });
+      const buffer = imageData.data.buffer;
+      try {
+        w.postMessage(
+          { type: "quality", id: id, width: imageData.width, height: imageData.height, buffer: buffer },
+          [buffer]
+        );
+      } catch (err) {
+        // postMessage can throw (e.g. detached buffer); reject rather than hang.
+        const r = pending.get(id);
+        pending.delete(id);
+        if (r) r.reject(err);
+        else reject(err);
+      }
+    });
+  }
+
+  // ---- helpers --------------------------------------------------------------
+  function r2(n) {
+    return Math.round(n * 100) / 100;
+  }
+
+  function estimateDpi(origW, origH) {
+    // Assume the image frames a full A4 page: long side = 297mm = 11.69in,
+    // short side = 210mm = 8.27in. Cross-check both and average.
+    const longPx = Math.max(origW, origH);
+    const shortPx = Math.min(origW, origH);
+    return Math.round((longPx / 11.69 + shortPx / 8.27) / 2);
+  }
+
+  // Conservative screenshot aspect-ratio set. 4:3 is deliberately EXCLUDED: it is
+  // far too common for genuine document scans/photos to use as a fail signal.
+  const SCREEN_RATIOS = [16 / 9, 18 / 9, 19.5 / 9, 20 / 9];
+  function aspectLooksLikeScreen(origW, origH) {
+    const a = origW / origH;
+    const inv = origH / origW;
+    const tol = 0.03;
+    for (let i = 0; i < SCREEN_RATIOS.length; i++) {
+      const r = SCREEN_RATIOS[i];
+      if (Math.abs(a - r) < tol || Math.abs(inv - r) < tol) return true;
+    }
+    return false;
+  }
+
+  // Evaluate metrics into check results.
+  //   metrics : object from runMetrics()
+  //   opts    : { isPdf, origWidth, origHeight }
+  // Returns { checks: [...], raw: metrics } where each check is
+  //   { id, n, label, status: 'pass'|'fail'|'skip'|'na', detail, message? }
+  function evaluate(metrics, opts) {
+    const isPdf = !!opts.isPdf;
+    const ow = opts.origWidth;
+    const oh = opts.origHeight;
+    const checks = [];
+
+    function add(id, n, label, status, detail, message) {
+      const c = { id: id, n: n, label: label, status: status, detail: detail };
+      if (message) c.message = message;
+      checks.push(c);
+    }
+
+    // 7 — Blur (variance of Laplacian). Skipped when there is essentially no
+    // content (blank/near-blank), where the metric is unreliable — the blank
+    // check handles that case.
+    const hasContent = metrics.inkRatio >= 0.008 || metrics.edgeDensityGlobal >= 0.01;
+    if (!hasContent) {
+      add("blur", 7, "Blur / focus", "skip", "Skipped (page has too little content to assess focus).");
+    } else if (metrics.blurVar < CFG.minBlurScore) {
+      add(
+        "blur",
+        7,
+        "Blur / focus",
+        "fail",
+        "Focus score " + r2(metrics.blurVar) + " < " + CFG.minBlurScore,
+        "This document is too blurry for reliable forensic analysis. Please upload a clearer scan."
+      );
+    } else {
+      add("blur", 7, "Blur / focus", "pass", "Focus score " + r2(metrics.blurVar));
+    }
+
+    // 8 — Shadow / uneven lighting.
+    const shadowBad =
+      metrics.veryDarkRatio > CFG.maxShadowAreaRatio || metrics.shadowUnevenness > CFG.maxShadowUnevenness;
+    add(
+      "shadow",
+      8,
+      "Shadow / lighting",
+      shadowBad ? "fail" : "pass",
+      "Dark area " +
+        (metrics.veryDarkRatio * 100).toFixed(1) +
+        "%, unevenness " +
+        r2(metrics.shadowUnevenness),
+      shadowBad
+        ? "Heavy shadow or uneven lighting is obscuring part of the document. Please retake it in even lighting."
+        : undefined
+    );
+
+    // 9 — Glare. Only flagged when a large blown-out region covers the center AND
+    // that center has little structure (so a normal text page is not mis-flagged).
+    const glareBad =
+      metrics.glareCenterRatio > CFG.maxGlareAreaRatio &&
+      metrics.centerEdgeDensity < CFG.glareMaxCenterEdgeDensity;
+    add(
+      "glare",
+      9,
+      "Glare",
+      glareBad ? "fail" : "pass",
+      "Center blown " +
+        (metrics.glareCenterRatio * 100).toFixed(1) +
+        "%, center edges " +
+        (metrics.centerEdgeDensity * 100).toFixed(1) +
+        "%",
+      glareBad
+        ? "The image has severe glare covering important content. Please retake the photo without flash/reflection."
+        : undefined
+    );
+
+    // 10 — DPI / resolution. IMAGES ONLY (PDFs are vector-rasterised by us).
+    if (isPdf) {
+      add("resolution", 10, "DPI / resolution", "na", "Not applicable (PDF is rendered at a fixed scale).");
+    } else {
+      const dpi = estimateDpi(ow, oh);
+      const minDim = Math.min(ow, oh);
+      const maxDim = Math.max(ow, oh);
+      const tooSmall = minDim < CFG.minImageWidth || maxDim < CFG.minImageHeight;
+      const lowDpi = dpi < CFG.minEstimatedDpi;
+      if (tooSmall || lowDpi) {
+        add(
+          "resolution",
+          10,
+          "DPI / resolution",
+          "fail",
+          ow + "x" + oh + "px, ~" + dpi + " dpi",
+          "This image's resolution is too low for reliable forensic analysis. Please upload a higher-resolution scan or photo."
+        );
+      } else {
+        add("resolution", 10, "DPI / resolution", "pass", ow + "x" + oh + "px, ~" + dpi + " dpi");
+      }
+    }
+
+    // 11 — Skew / rotation.
+    if (!metrics.skewReliable) {
+      add("skew", 11, "Skew / rotation", "skip", "Skipped (not enough text lines to estimate skew).");
+    } else if (Math.abs(metrics.skewDeg) > CFG.maxSkewDegrees) {
+      add(
+        "skew",
+        11,
+        "Skew / rotation",
+        "fail",
+        "Estimated skew " + r2(metrics.skewDeg) + "°",
+        "The document is too tilted or rotated for reliable analysis. Please straighten it and retake."
+      );
+    } else {
+      add("skew", 11, "Skew / rotation", "pass", "Estimated skew " + r2(metrics.skewDeg) + "°");
+    }
+
+    // 12 — Brightness (two-sided). The "too bright" side is gated on low edge
+    // content so a clean white scan with crisp text (bright background, but lots
+    // of structure) is not mistaken for an overexposed/washed-out capture.
+    const brightDetail =
+      "Mean luminance " + r2(metrics.brightness) + ", edges " + (metrics.edgeDensityGlobal * 100).toFixed(1) + "%";
+    if (metrics.brightness < CFG.minBrightness) {
+      add(
+        "brightness",
+        12,
+        "Brightness",
+        "fail",
+        brightDetail,
+        "This image is too dark to read reliably. Please retake it in better lighting."
+      );
+    } else if (metrics.brightness > CFG.maxBrightness && metrics.edgeDensityGlobal < CFG.overexposedMaxEdgeDensity) {
+      add(
+        "brightness",
+        12,
+        "Brightness",
+        "fail",
+        brightDetail,
+        "This image is overexposed (too bright). Please retake it without direct glare or flash."
+      );
+    } else {
+      add("brightness", 12, "Brightness", "pass", brightDetail);
+    }
+
+    // 13 — Noise / grain (severe only).
+    if (metrics.noiseStd > CFG.maxNoiseStd) {
+      add(
+        "noise",
+        13,
+        "Noise / grain",
+        "fail",
+        "Flat-region noise " + r2(metrics.noiseStd),
+        "This image is too noisy or grainy for reliable analysis. Please upload a cleaner scan."
+      );
+    } else {
+      add("noise", 13, "Noise / grain", "pass", "Flat-region noise " + r2(metrics.noiseStd));
+    }
+
+    // 14 — Screenshot. IMAGES ONLY, conservative (aspect ratio of a screen AND a
+    // flat UI band). TODO: replace with a trained screenshot classifier.
+    if (isPdf) {
+      add("screenshot", 14, "Screenshot", "na", "Not applicable (PDF input).");
+    } else {
+      const aspectHit = aspectLooksLikeScreen(ow, oh);
+      const topFlat = metrics.topBandVar < 25;
+      const botFlat = metrics.botBandVar < 25;
+      const score = (aspectHit ? 0.5 : 0) + (topFlat ? 0.25 : 0) + (botFlat ? 0.25 : 0);
+      const detail =
+        "score " + r2(score) + " (aspect " + (aspectHit ? "y" : "n") + ", bars " + (topFlat ? "T" : "-") + (botFlat ? "B" : "-") + ")";
+      if (score >= CFG.screenshotScoreFail) {
+        add(
+          "screenshot",
+          14,
+          "Screenshot",
+          "fail",
+          detail,
+          "This looks like a screen capture, which isn't suitable for forensic analysis. Please upload an original scan or photo of the document."
+        );
+      } else {
+        add("screenshot", 14, "Screenshot", "pass", detail);
+      }
+    }
+
+    // 15 — Occlusion (large central dark blob).
+    const occBad = metrics.occlusionRatio > CFG.maxOcclusionAreaRatio && metrics.occlusionCentral;
+    add(
+      "occlusion",
+      15,
+      "Occlusion",
+      occBad ? "fail" : "pass",
+      "Largest dark blob " + (metrics.occlusionRatio * 100).toFixed(1) + "%" + (metrics.occlusionCentral ? " (central)" : ""),
+      occBad
+        ? "Part of the document is covered or obstructed. Please retake it with the full page visible."
+        : undefined
+    );
+
+    return { checks: checks, raw: metrics };
+  }
+
+  function terminate() {
+    if (worker) {
+      worker.terminate();
+      worker = null;
+    }
+    pending.clear();
+  }
+
+  global.ReagvisImageQuality = {
+    runMetrics: runMetrics,
+    evaluate: evaluate,
+    estimateDpi: estimateDpi,
+    terminate: terminate,
+  };
+})(typeof self !== "undefined" ? self : this);
