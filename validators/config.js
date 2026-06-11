@@ -127,6 +127,11 @@
     // normal text-on-white page (lots of edges) is NOT mistaken for glare.
     maxGlareAreaRatio: 0.15, // [DEMO — tune] fraction of center that is blown
     glareMaxCenterEdgeDensity: 0.02, // glare only if center has little text/structure
+    // Second glare signal: a LOCALIZED specular reflection — a smooth region much
+    // brighter than the surrounding paper — sitting on an otherwise readable page.
+    // The whole-centre test above misses this (the page still has text). Fraction
+    // of content blocks that are bright-smooth hotspots; clean paper reads ~0. [tune]
+    glareHotspotMaxRatio: 0.05,
 
     // Shadow / uneven lighting. Conservative: requires BOTH a large very-dark
     // area AND strong quadrant unevenness, so a single dark element (an ID photo,

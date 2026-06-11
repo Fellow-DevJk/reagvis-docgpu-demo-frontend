@@ -42,6 +42,7 @@ CFG = dict(
     washoutMaxBlur=1500,
     maxGlareAreaRatio=0.15,
     glareMaxCenterEdgeDensity=0.02,
+    glareHotspotMaxRatio=0.05,
     maxShadowAreaRatio=0.10,
     maxShadowUnevenness=95,
     maxNoiseStd=12,
@@ -93,6 +94,23 @@ def native_center_crop(im, maxside):
     cw, ch = min(w, maxside), min(h, maxside)
     l, t = (w - cw) // 2, (h - ch) // 2
     return np.asarray(im.crop((l, t, l + cw, t + ch)), dtype=np.float32)
+
+
+def glare_hotspot(Y, edge_full):
+    H, W = Y.shape
+    bs = max(8, H // 16)
+    means, edges = [], []
+    for by in range(0, H - bs + 1, bs):
+        for bx in range(0, W - bs + 1, bs):
+            means.append(float(Y[by:by + bs, bx:bx + bs].mean()))
+            edges.append(float(edge_full[by:by + bs, bx:bx + bs].mean()))
+    means, edges = np.array(means), np.array(edges)
+    content = means >= 100
+    if content.sum() == 0:
+        return 0.0
+    paper_med = float(np.median(means[content]))
+    glare = content & (means > paper_med + 45) & (edges < 0.03)
+    return float(glare.sum() / content.sum())
 
 
 def laplacian(Y):
@@ -151,6 +169,9 @@ def metrics(im):
     m["edgeDensityGlobal"] = float(edge.mean())
     ec = edge[cy0 - 1:cy1 - 1, cx0 - 1:cx1 - 1]
     m["centerEdgeDensity"] = float(ec.mean()) if ec.size else 0.0
+    edge_full = np.zeros(Y.shape, dtype=np.float32)
+    edge_full[1:-1, 1:-1] = edge.astype(np.float32)
+    m["glareHotspotRatio"] = glare_hotspot(Y, edge_full)
     # noise on the NATIVE crop (luma + chroma)
     luma, chroma = flat_noise_lc(
         native_center_crop(im, CFG["noiseCropMaxSide"]))
@@ -312,8 +333,9 @@ def evaluate(path):
     if has_content and m["blurVar"] < CFG["minBlurScore"]:
         fails.append("blur")
     # 9 glare
-    if m["glareCenterRatio"] > CFG["maxGlareAreaRatio"] and m[
-            "centerEdgeDensity"] < CFG["glareMaxCenterEdgeDensity"]:
+    if (m["glareCenterRatio"] > CFG["maxGlareAreaRatio"]
+            and m["centerEdgeDensity"] < CFG["glareMaxCenterEdgeDensity"]
+        ) or m["glareHotspotRatio"] > CFG["glareHotspotMaxRatio"]:
         fails.append("glare")
     # 8 shadow (BOTH conditions)
     if m["veryDarkRatio"] > CFG["maxShadowAreaRatio"] and m[

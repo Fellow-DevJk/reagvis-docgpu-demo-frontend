@@ -29,6 +29,8 @@ const VERY_DARK_LEVEL = 30; // luminance below this counts toward shadow
 const BLOWN_LEVEL = 250; // luminance at/above this is a blown (clipped white) pixel
 const BLOWN_MAX_SAT = 12; // ...and chroma below this ⇒ specular/white, not coloured
 const EDGE_LAP = 24; // |Laplacian| at/above this counts as a structural edge
+const GLARE_HOTSPOT_DELTA = 45; // a block this much brighter than the paper median = glare
+const GLARE_HOTSPOT_MAX_EDGE = 0.03; // ...and this smooth (specular reflections have no text)
 // 3x3 window range below this is "flat" (used for the noise estimate). It must be
 // LARGE enough that a genuinely noisy-but-textureless window still qualifies as
 // flat — otherwise the noise check is unreachable (a window noisy enough to
@@ -62,6 +64,7 @@ function computeMetrics(W, H, buffer, noiseFrame) {
   const N = W * H;
   const gray = new Uint8Array(N);
   const hist = new Uint32Array(256); // luminance histogram for the p90 highlight
+  const edgeMap = new Uint8Array(N); // strong-edge mask (filled in pass 2)
 
   // ---------------- Pass 1: single RGBA sweep ----------------
   // Accumulates: grayscale, mean brightness, ink/very-dark ratios, per-quadrant
@@ -165,7 +168,10 @@ function computeMetrics(W, H, buffer, noiseFrame) {
       lapSum2 += lap * lap;
       lapN++;
       const absLap = lap < 0 ? -lap : lap;
-      if (absLap >= EDGE_LAP) edgeGlobal++;
+      if (absLap >= EDGE_LAP) {
+        edgeGlobal++;
+        edgeMap[idx] = 1;
+      }
       if (inYCenter && x >= cx0 && x < cx1) {
         centerInterior++;
         if (absLap >= EDGE_LAP) edgeCenter++;
@@ -176,6 +182,11 @@ function computeMetrics(W, H, buffer, noiseFrame) {
   const blurVar = lapN ? lapSum2 / lapN - lapMean * lapMean : 0;
   const edgeDensityGlobal = lapN ? edgeGlobal / lapN : 0;
   const centerEdgeDensity = centerInterior ? edgeCenter / centerInterior : 0;
+
+  // Localized glare/reflection: a smooth (low-edge) region that is much brighter
+  // than the surrounding document paper — catches a specular hotspot ON a
+  // readable page, which the whole-centre glareCenterRatio test misses.
+  const glareHotspotRatio = glareHotspot(gray, edgeMap, W, H);
 
   // ---------------- Noise (luma + chroma) on the NATIVE crop ----------------
   // Measured on msg.noiseBuffer (a native-resolution centre crop) so real grain
@@ -221,6 +232,7 @@ function computeMetrics(W, H, buffer, noiseFrame) {
     quadMeans: quadMeans,
     shadowUnevenness: shadowUnevenness,
     glareCenterRatio: glareCenterRatio,
+    glareHotspotRatio: glareHotspotRatio,
     blurVar: blurVar,
     edgeDensityGlobal: edgeDensityGlobal,
     centerEdgeDensity: centerEdgeDensity,
@@ -335,6 +347,45 @@ function variance(arr) {
   }
   const m = s / arr.length;
   return s2 / arr.length - m * m;
+}
+
+// Localized glare/reflection detector. Splits the frame into a coarse block grid;
+// among "content" blocks (bright enough to be document, not dark background),
+// counts blocks that are BOTH much brighter than the paper median AND smooth
+// (few edges) — i.e. specular highlights sitting on the page. Returns the
+// fraction of content blocks that are such hotspots. Clean uniform paper → ~0.
+function glareHotspot(gray, edgeMap, W, H) {
+  const bs = Math.max(8, (H / 16) | 0);
+  const means = [];
+  const edges = [];
+  for (let by = 0; by + bs <= H; by += bs) {
+    for (let bx = 0; bx + bs <= W; bx += bs) {
+      let sum = 0;
+      let ec = 0;
+      let n = 0;
+      for (let y = by; y < by + bs; y++) {
+        const row = y * W;
+        for (let x = bx; x < bx + bs; x++) {
+          sum += gray[row + x];
+          ec += edgeMap[row + x];
+          n++;
+        }
+      }
+      means.push(sum / n);
+      edges.push(ec / n);
+    }
+  }
+  const content = [];
+  for (let i = 0; i < means.length; i++) if (means[i] >= 100) content.push(i);
+  if (content.length === 0) return 0;
+  const sorted = content.map(function (i) { return means[i]; }).sort(function (a, b) { return a - b; });
+  const paperMed = sorted[sorted.length >> 1];
+  let glare = 0;
+  for (let k = 0; k < content.length; k++) {
+    const i = content[k];
+    if (means[i] > paperMed + GLARE_HOTSPOT_DELTA && edges[i] < GLARE_HOTSPOT_MAX_EDGE) glare++;
+  }
+  return glare / content.length;
 }
 
 // Otsu's threshold over a grayscale histogram.

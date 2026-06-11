@@ -197,11 +197,15 @@
         : undefined
     );
 
-    // 9 — Glare. Only flagged when a large blown-out region covers the center AND
-    // that center has little structure (so a normal text page is not mis-flagged).
+    // 9 — Glare. Fires either when a large blown-out region covers the center
+    // (whole-center wash, with little structure there) OR when there's a LOCALIZED
+    // specular reflection — a smooth hotspot much brighter than the paper — on an
+    // otherwise readable page.
+    const hotspot = metrics.glareHotspotRatio || 0;
     const glareBad =
-      metrics.glareCenterRatio > CFG.maxGlareAreaRatio &&
-      metrics.centerEdgeDensity < CFG.glareMaxCenterEdgeDensity;
+      (metrics.glareCenterRatio > CFG.maxGlareAreaRatio &&
+        metrics.centerEdgeDensity < CFG.glareMaxCenterEdgeDensity) ||
+      hotspot > CFG.glareHotspotMaxRatio;
     add(
       "glare",
       9,
@@ -211,9 +215,11 @@
         (metrics.glareCenterRatio * 100).toFixed(1) +
         "%, center edges " +
         (metrics.centerEdgeDensity * 100).toFixed(1) +
+        "%, hotspot " +
+        (hotspot * 100).toFixed(1) +
         "%",
       glareBad
-        ? "The image has severe glare covering important content. Please retake the photo without flash/reflection."
+        ? "The image has glare/reflection on the document. Please retake the photo without flash or reflections."
         : undefined
     );
 
