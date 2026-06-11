@@ -362,17 +362,23 @@
   V.submit = async function () {
     if (V.state.verdict !== "accepted") {
       global.log && global.log("Submit blocked: intake validation has not passed.");
-      return { ok: false, reason: "not-passed" };
+      return { ok: false, reason: "not-passed", message: "Run verification and pass the checks before submitting." };
     }
     if (!UI.hasCredentials()) {
       UI.openConnection();
       global.log && global.log("Enter API Base URL + Bearer Token in the Connection panel to submit.");
-      return { ok: false, reason: "no-credentials" };
+      return {
+        ok: false,
+        reason: "no-credentials",
+        message: "Enter the API Base URL and Bearer Token in the Connection panel (opened, bottom-right), then submit.",
+      };
     }
     const conn = UI.getConnection();
-    const jobId = conn.jobId || global.makeJobId();
-    const jobInput = document.getElementById("jobId");
-    if (jobInput) jobInput.value = jobId;
+    // Use a FRESH job id each submission unless the user explicitly typed one.
+    // We never write the generated id back into the #jobId input — reusing an
+    // auto-generated id across submissions makes the API return 409
+    // "Job already exists" (the cause of the intermittent "submit not working").
+    let jobId = conn.jobId || global.makeJobId();
 
     V.state.submitting = true;
     global.setStatus && global.setStatus("Uploading", "warn");
@@ -385,7 +391,19 @@
         docs.push(uri);
       }
       global.setStatus && global.setStatus("Submitting", "warn");
-      const submitResp = await global.submitJob(conn.apiBase, conn.bearer, conn.originVerify, jobId, docs);
+      let submitResp;
+      try {
+        submitResp = await global.submitJob(conn.apiBase, conn.bearer, conn.originVerify, jobId, docs);
+      } catch (err) {
+        // Job-id collision: retry once with a brand-new id, reusing the
+        // already-uploaded documents.
+        if (is409(err)) {
+          jobId = global.makeJobId();
+          submitResp = await global.submitJob(conn.apiBase, conn.bearer, conn.originVerify, jobId, docs);
+        } else {
+          throw err;
+        }
+      }
       global.log && global.log("Forensic job submitted — you may safely leave this page.", submitResp);
       global.setStatus && global.setStatus("Submitted", "ok");
 
@@ -410,9 +428,20 @@
       global.setStatus && global.setStatus("Error", "bad");
       global.log && global.log("Submit error:", String(err));
       if (err && err.details) global.log && global.log("Error details:", err.details);
-      return { ok: false, reason: "error", error: err };
+      return { ok: false, reason: "error", error: err, message: submitErrorMessage(err) };
     }
   };
+
+  function is409(err) {
+    return !!(err && err.details && err.details.response && err.details.response.status === 409);
+  }
+  function submitErrorMessage(err) {
+    const st = err && err.details && err.details.response && err.details.response.status;
+    if (st === 401 || st === 403) return "Authentication failed — check the Bearer Token in the Connection panel.";
+    if (st === 409) return "This job already exists. Please try submitting again.";
+    if (st) return "Submission failed (HTTP " + st + "). See the Connection panel → Activity log for details.";
+    return "Submission failed — check the API Base URL / network in the Connection panel.";
+  }
 
   // ---------- optional forensic report (poll + fetch + render) ----------
   V.fetchForensicReport = async function (onState) {

@@ -374,6 +374,12 @@
         else {
           submit.innerHTML = "Submit " + icon("chevronRight", 14);
           submit.disabled = !UI.verify.canSubmit();
+          const banner = document.getElementById("flowBanner");
+          if (banner) {
+            banner.innerHTML =
+              '<div class="verdict-banner bad">' + icon("alertTriangle", 18) +
+              "<span><b>Couldn't submit.</b> " + esc(res.message || "Submission failed.") + "</span></div>";
+          }
         }
       });
     }
