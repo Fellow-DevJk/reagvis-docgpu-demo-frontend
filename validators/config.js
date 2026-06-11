@@ -84,7 +84,12 @@
     minEstimatedDpi: 60, // assuming the image frames a full A4 page
 
     // Focus / blur — variance of the Laplacian. LOWER = blurrier.
-    minBlurScore: 100, // [DEMO — tune] sharp scans are typically > 300
+    // Raised from 100: a soft, low-detail capture (variance of Laplacian ~190,
+    // ~20x softer than a crisp scan) reads as fine "grain" perceptually but barely
+    // registers on the flat-region noise metric — softness is its real defect, so
+    // the sharpness floor catches it. Crisp real photos (e.g. a curved page photo,
+    // ~1275) and clean scans (4000+) stay well clear. [DEMO — tune]
+    minBlurScore: 200,
 
     // Brightness — mean luminance (0..255).
     // NOTE: document scans are mostly white paper, so their MEAN luminance is
@@ -134,8 +139,11 @@
     // centre crop (the global downscale averages real grain away, so noise must be
     // measured before it). Measured for luma AND chroma; chroma catches colour
     // speckle that luma misses. Clean scans read luma ~0.6 / chroma ~0; heavy grain
-    // 20+. Fail only on clearly bad grain. [DEMO — tune on real samples]
-    maxNoiseStd: 7, // native-resolution luma flat-region std
+    // 20+. Raised the luma gate from 7 to 12 because fine document DETAIL on a
+    // sharp, dense page (e.g. a curved-page photo) leaks into the flat-region std
+    // (~8) and was false-rejecting readable documents; genuine added grain still
+    // reads 20+. [DEMO — tune on real samples]
+    maxNoiseStd: 12, // native-resolution luma flat-region std
     maxChromaNoiseStd: 8, // native-resolution chroma flat-region std
 
     // Skew / rotation — estimated text-line tilt in degrees.
