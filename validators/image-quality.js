@@ -293,6 +293,23 @@
         brightDetail,
         "This image is overexposed (too bright). Please retake it without direct glare or flash."
       );
+    } else if (
+      metrics.brightness > CFG.washoutMinBrightness &&
+      metrics.edgeDensityGlobal > CFG.washoutMinEdge &&
+      metrics.inkRatio < CFG.washoutMaxInk &&
+      metrics.blurVar >= CFG.minBlurScore &&
+      metrics.blurVar < CFG.washoutMaxBlur
+    ) {
+      // Bright + has structure + almost no dark ink + soft (low-contrast, but not
+      // blurry) ⇒ the document is washed out by overexposure.
+      add(
+        "brightness",
+        12,
+        "Brightness",
+        "fail",
+        brightDetail + ", ink " + (metrics.inkRatio * 100).toFixed(2) + "%",
+        "This image is overexposed — the document is washed out and hard to read. Please retake it in even lighting, without flash."
+      );
     } else {
       add("brightness", 12, "Brightness", "pass", brightDetail);
     }

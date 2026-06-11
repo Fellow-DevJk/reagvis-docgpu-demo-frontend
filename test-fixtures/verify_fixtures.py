@@ -36,6 +36,10 @@ CFG = dict(
     maxBrightness=248,
     minBrightnessHighlight=90,
     overexposedMaxEdgeDensity=0.01,
+    washoutMinBrightness=215,
+    washoutMinEdge=0.03,
+    washoutMaxInk=0.015,
+    washoutMaxBlur=1500,
     maxGlareAreaRatio=0.15,
     glareMaxCenterEdgeDensity=0.02,
     maxShadowAreaRatio=0.10,
@@ -298,6 +302,11 @@ def evaluate(path):
     elif m["brightness"] > CFG["maxBrightness"] and m[
             "edgeDensityGlobal"] < CFG["overexposedMaxEdgeDensity"]:
         fails.append("brightness")
+    elif (m["brightness"] > CFG["washoutMinBrightness"]
+          and m["edgeDensityGlobal"] > CFG["washoutMinEdge"]
+          and m["inkRatio"] < CFG["washoutMaxInk"]
+          and CFG["minBlurScore"] <= m["blurVar"] < CFG["washoutMaxBlur"]):
+        fails.append("brightness")  # washed-out overexposure
     # 7 blur
     has_content = m["inkRatio"] >= 0.008 or m["edgeDensityGlobal"] >= 0.01
     if has_content and m["blurVar"] < CFG["minBlurScore"]:

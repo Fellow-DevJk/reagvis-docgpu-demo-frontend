@@ -102,6 +102,20 @@
     // otherwise a clean white scan with crisp text (lots of edges) is wrongly
     // rejected just for having a bright background.
     overexposedMaxEdgeDensity: 0.01,
+    // Washed-out overexposure: a bright page that HAS structure (edges/text) but
+    // almost no dark "ink" — the content is blown to light grey and hard to read.
+    // This catches glare/flash washouts that the two rules above miss (mean just
+    // under 248, some surviving edges). It is distinguished from a clean dark-text
+    // scan (which has real ink, inkRatio ~2-3%), from a dark-background photo
+    // (high ink), and from a blank page (no edges). [DEMO — tune]
+    washoutMinBrightness: 215, // page must be bright
+    washoutMinEdge: 0.03, // ...and have recoverable structure (not blank)
+    washoutMaxInk: 0.015, // ...but almost no dark ink (content washed out)
+    // ...and be soft/low-contrast (overexposure flattens contrast). The lower
+    // bound (minBlurScore) keeps genuinely BLURRY images on the blur check, and
+    // the upper bound keeps CRISP images (glare-with-text, screenshots) off this
+    // check — only a washed, soft, bright page with no dark ink lands here.
+    washoutMaxBlur: 1500,
 
     // Glare — a large, BLOWN-OUT (near-pure-white), texture-less region over the
     // central document area. We require low center edge-density too, so that a
