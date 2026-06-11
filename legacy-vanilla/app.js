@@ -19,19 +19,13 @@ function log(...args) {
   const line = args
     .map((v) => (typeof v === "string" ? v : JSON.stringify(v, null, 2)))
     .join(" ");
-  // eslint-disable-next-line no-console
-  console.log("[reagvis]", line);
-  if (logEl) {
-    logEl.textContent += `${new Date().toISOString()}  ${line}\n`;
-    logEl.scrollTop = logEl.scrollHeight;
-  }
+  logEl.textContent += `${new Date().toISOString()}  ${line}\n`;
+  logEl.scrollTop = logEl.scrollHeight;
 }
 
 function setStatus(label, tone = "") {
-  if (statusPill) {
-    statusPill.textContent = label;
-    statusPill.className = `pill ${tone}`.trim();
-  }
+  statusPill.textContent = label;
+  statusPill.className = `pill ${tone}`.trim();
 }
 
 function makeJobId() {
@@ -1296,7 +1290,17 @@ function buildReportHtml(report) {
 }
 
 function setJson(el, data) {
-  if (el) el.textContent = JSON.stringify(data, null, 2);
+  el.textContent = JSON.stringify(data, null, 2);
+}
+
+function refreshActionButtons() {
+  const hasJob = Boolean(state.lastJob);
+  const hasReport = Boolean(state.lastReport);
+
+  $("copyJobJsonBtn").disabled = !hasJob;
+  $("copyReportJsonBtn").disabled = !hasReport;
+  $("downloadReportJsonBtn").disabled = !hasReport;
+  $("openPrintableBtn").disabled = !hasReport;
 }
 
 async function copyText(text) {
@@ -1309,12 +1313,322 @@ async function handleFetchedReport(report) {
 
   const html = buildReportHtml(report);
   state.reportHtml = html;
-  if (reportFrame) reportFrame.srcdoc = html;
+  reportFrame.srcdoc = html;
+  refreshActionButtons();
 }
 
-/* Orchestration (file selection, intake validation, submit pipeline, optional
- * report fetch) now lives in ui/verify.js, calling the core functions above.
- * The API + report-building logic above is unchanged. */
+/* =====================================================================
+ * Document intake validation — client-side UX gate (PASS/FAIL).
+ * ---------------------------------------------------------------------
+ * This layer decides only whether a document is SUITABLE for reliable
+ * forensic analysis. It does NOT decide authenticity — the backend
+ * forensic model does that asynchronously after submission. Client-side
+ * validation is NOT a security control; the backend must re-validate.
+ * Implementation: validators/* and workers/validation-worker.js.
+ * ===================================================================== */
+
+const intakePill = $("intakePill");
+const intakeHint = $("intakeHint");
+const intakeFilesEl = $("intakeFiles");
+const intakeHandoffEl = $("intakeHandoff");
+
+const STAGE_LABELS = {
+  preparing: "Preparing document…",
+  quality: "Checking image quality…",
+  readability: "Checking readability…",
+};
+const CHECK_MARKS = { pass: "✓", fail: "✕", skip: "–", na: "–" };
+
+function prettyBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function setIntakePill(label, tone = "") {
+  intakePill.textContent = label;
+  intakePill.className = `pill ${tone}`.trim();
+}
+
+function intakeCardId(i) {
+  return `intakeFile-${i}`;
+}
+
+function renderInitialCards(files) {
+  intakeFilesEl.innerHTML = files
+    .map(
+      (file, i) => `
+      <div class="intake-file" id="${intakeCardId(i)}" data-status="running">
+        <div class="if-top">
+          <span class="if-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)} <span class="if-meta">· ${escapeHtml(prettyBytes(file.size))}</span></span>
+          <span class="if-status pill">Queued</span>
+        </div>
+        <div class="if-msg">Waiting to start…</div>
+      </div>`
+    )
+    .join("");
+}
+
+function updateCardStage(i, stage) {
+  const card = $(intakeCardId(i));
+  if (!card) return;
+  card.dataset.status = "running";
+  const status = card.querySelector(".if-status");
+  const msg = card.querySelector(".if-msg");
+  if (status) {
+    status.className = "if-status pill";
+    status.textContent = "Checking…";
+  }
+  if (msg) msg.textContent = STAGE_LABELS[stage] || "Validating…";
+}
+
+function renderChecks(checks) {
+  return checks
+    .map(
+      (c) => `<div class="if-check" data-st="${c.status}">
+        <span class="ic-mark">${CHECK_MARKS[c.status] || "–"}</span>
+        <span class="ic-label">${c.n}. ${escapeHtml(c.label)}</span>
+        <span class="ic-detail">${escapeHtml(c.detail || "")}</span>
+      </div>`
+    )
+    .join("");
+}
+
+function renderCardResult(i, result) {
+  const card = $(intakeCardId(i));
+  if (!card) return;
+  card.dataset.status = result.status;
+  const tone = result.status === "pass" ? "ok" : "bad";
+  const label = result.status === "pass" ? "Accepted" : "Rejected";
+  card.innerHTML = `
+    <div class="if-top">
+      <span class="if-name" title="${escapeHtml(result.name)}">${escapeHtml(result.name)} <span class="if-meta">· ${escapeHtml(result.sizePretty)}</span></span>
+      <span class="if-status pill ${tone}">${label}</span>
+    </div>
+    <div class="if-msg">${escapeHtml(result.headline)}</div>
+    <details class="if-details">
+      <summary>View validation details</summary>
+      <div class="if-check-list">${renderChecks(result.checks)}</div>
+    </details>`;
+  // Raw forensic-suitability scores stay in the console for tuning, never user-facing.
+  if (result.debug) console.debug(`[intake] ${result.name}`, result.debug);
+}
+
+function updateIntakeOverall(overall) {
+  state.validation.overall = overall;
+  state.validation.status = overall.status; // "passed" | "failed"
+  if (overall.status === "passed") {
+    setIntakePill("Ready for forensic analysis", "ok");
+  } else {
+    setIntakePill("Action required", "bad");
+  }
+  intakeHint.textContent = overall.message;
+  updateRunGate();
+}
+
+function updateRunGate() {
+  const passed = state.validation && state.validation.status === "passed";
+  const btn = $("runBtn");
+  btn.disabled = !passed;
+  btn.title = passed
+    ? "Validation passed — upload and submit for forensic analysis."
+    : "Select a document and pass intake validation to enable.";
+}
+
+function showHandoff() {
+  intakeHandoffEl.hidden = false;
+  intakeHandoffEl.innerHTML = `Document accepted for forensic analysis. The forensic job has started.
+    <span class="ih-sub">You may safely leave this page — analysis continues on the server and the report stays available for this Job ID.</span>`;
+}
+
+function hideHandoff() {
+  intakeHandoffEl.hidden = true;
+  intakeHandoffEl.innerHTML = "";
+}
+
+async function handleFilesSelected() {
+  const files = Array.from($("files").files || []);
+  hideHandoff();
+  state.validation = { status: "idle", files: [], overall: null, errors: [] };
+
+  if (!files.length) {
+    intakeFilesEl.innerHTML = "";
+    setIntakePill("No file", "");
+    intakeHint.textContent = "Select a document to begin intake checks.";
+    updateRunGate();
+    return;
+  }
+
+  state.validation.status = "running";
+  state.validation.files = files.map((f) => ({ name: f.name, size: f.size, status: "running" }));
+  setIntakePill("Validating…", "");
+  intakeHint.textContent = "Preparing document for forensic analysis…";
+  renderInitialCards(files);
+  updateRunGate();
+
+  if (!window.ReagvisIntake) {
+    setIntakePill("Unavailable", "bad");
+    intakeHint.textContent = "Validation engine failed to load. Check your connection and reload.";
+    updateRunGate();
+    return;
+  }
+
+  try {
+    await window.ReagvisIntake.validate(files, {
+      stage: (i, stage) => updateCardStage(i, stage),
+      fileResult: (i, result) => {
+        state.validation.files[i] = { name: result.name, size: result.size, status: result.status };
+        renderCardResult(i, result);
+      },
+      overall: (overall) => updateIntakeOverall(overall),
+    });
+  } catch (err) {
+    console.error("[intake] validation error", err);
+    state.validation.status = "failed";
+    setIntakePill("Error", "bad");
+    intakeHint.textContent = "Intake validation could not complete. Please reselect the document.";
+    updateRunGate();
+  }
+}
+
+async function runPipeline() {
+  const apiBase = $("apiBase").value.trim().replace(/\/$/, "");
+  const bearer = $("bearer").value.trim();
+  const originVerify = $("originVerify").value.trim();
+  const files = Array.from($("files").files || []);
+  const explicitJobId = $("jobId").value.trim();
+
+  if (!apiBase || !bearer) {
+    log("Missing API base or bearer token.");
+    return;
+  }
+  if (!files.length) {
+    log("Select at least one file.");
+    return;
+  }
+  if (files.length > 10) {
+    log("Max 10 files per job.");
+    return;
+  }
+
+  // Intake validation gate — a document must PASS the client-side suitability
+  // checks before any presign/upload/submit. (Defense in depth: the run button
+  // is already disabled until validation passes, but never upload on FAIL.)
+  const vStatus = state.validation ? state.validation.status : "idle";
+  if (vStatus === "running") {
+    setStatus("Validating", "warn");
+    log("Please wait, document intake is finishing.");
+    return;
+  }
+  if (vStatus !== "passed") {
+    setStatus("Blocked", "bad");
+    log("Document intake validation has not passed. Resolve the flagged issues before submitting.");
+    return;
+  }
+
+  const jobId = explicitJobId || makeJobId();
+  $("jobId").value = jobId;
+
+  setStatus("Uploading", "warn");
+  log(`Job: ${jobId}`);
+
+  const docs = [];
+  for (const file of files) {
+    log(`Presign: ${file.name}`);
+    const sign = await presign(apiBase, bearer, originVerify, file, jobId);
+    log(`Upload: ${file.name}`);
+    const uri = await uploadOne(file, sign);
+    docs.push(uri);
+    log("Uploaded document URI:", { file: file.name, uri });
+  }
+
+  setStatus("Submitting", "warn");
+  log("Submitting job...");
+  const submit = await submitJob(apiBase, bearer, originVerify, jobId, docs);
+  log("Submit response:", submit);
+
+  // Handoff: the async forensic job has started. The user may safely leave now;
+  // the polling/report preview below is a demo convenience, not a requirement.
+  showHandoff();
+  log("Document accepted for forensic analysis. Forensic job submitted — you may safely leave this page.");
+
+  setStatus("Processing", "warn");
+  log("Polling started (every 5s, up to 10 min)...");
+
+  let last = null;
+  for (let i = 0; i < 120; i++) {
+    await new Promise((r) => setTimeout(r, 5000));
+    const polled = await pollJob(apiBase, bearer, originVerify, jobId);
+    last = polled;
+    log(`Poll #${i + 1}: status=${polled.status || "unknown"}`);
+    if (polled.status === "COMPLETED" || polled.status === "FAILED") break;
+  }
+
+  if (!last) throw new Error("Polling did not return a job state.");
+
+  state.lastJob = last;
+  setJson(jobJsonEl, last);
+  refreshActionButtons();
+
+  if (last.status !== "COMPLETED") {
+    setStatus(String(last.status || "FAILED"), "bad");
+    log("Job did not complete successfully.");
+    return;
+  }
+
+  setStatus("Fetching Report", "warn");
+  const report = await fetchReport(apiBase, bearer, originVerify, jobId, false);
+  await handleFetchedReport(report);
+
+  setStatus("Completed", "ok");
+  log("Report fetched and preview rendered.");
+}
+
+async function pollExisting() {
+  const apiBase = $("apiBase").value.trim().replace(/\/$/, "");
+  const bearer = $("bearer").value.trim();
+  const originVerify = $("originVerify").value.trim();
+  const jobId = $("jobId").value.trim();
+
+  if (!apiBase || !bearer || !jobId) {
+    log("Need API base, bearer token, and job ID.");
+    return;
+  }
+
+  setStatus("Polling", "warn");
+  const job = await pollJob(apiBase, bearer, originVerify, jobId);
+  state.lastJob = job;
+  setJson(jobJsonEl, job);
+  refreshActionButtons();
+
+  if (job.status === "COMPLETED") {
+    setStatus("Completed", "ok");
+  } else if (job.status === "FAILED") {
+    setStatus("Failed", "bad");
+  } else {
+    setStatus(String(job.status || "Submitted"), "warn");
+  }
+
+  log("Poll response:", job);
+}
+
+async function fetchExistingReport() {
+  const apiBase = $("apiBase").value.trim().replace(/\/$/, "");
+  const bearer = $("bearer").value.trim();
+  const originVerify = $("originVerify").value.trim();
+  const jobId = $("jobId").value.trim();
+
+  if (!apiBase || !bearer || !jobId) {
+    log("Need API base, bearer token, and job ID.");
+    return;
+  }
+
+  setStatus("Fetching Report", "warn");
+  const report = await fetchReport(apiBase, bearer, originVerify, jobId, false);
+  await handleFetchedReport(report);
+  setStatus("Report Ready", "ok");
+  log("Report response:", report);
+}
 
 function openPrintableReport() {
   if (!state.reportHtml) return;
@@ -1381,4 +1695,64 @@ function downloadReportJson() {
   URL.revokeObjectURL(url);
 }
 
-window.ReagvisState = state;
+$("runBtn").addEventListener("click", async () => {
+  $("runBtn").disabled = true;
+  try {
+    await runPipeline();
+  } catch (err) {
+    setStatus("Error", "bad");
+    log("Error:", String(err));
+    if (err?.details) log("Error details:", err.details);
+  } finally {
+    // Re-gate against validation state instead of unconditionally re-enabling.
+    updateRunGate();
+  }
+});
+
+// Start intake validation automatically as soon as files are selected.
+$("files").addEventListener("change", handleFilesSelected);
+
+$("pollBtn").addEventListener("click", async () => {
+  try {
+    await pollExisting();
+  } catch (err) {
+    setStatus("Error", "bad");
+    log("Poll error:", String(err));
+    if (err?.details) log("Poll error details:", err.details);
+  }
+});
+
+$("fetchReportBtn").addEventListener("click", async () => {
+  try {
+    await fetchExistingReport();
+  } catch (err) {
+    setStatus("Error", "bad");
+    log("Report fetch error:", String(err));
+    if (err?.details) log("Report fetch error details:", err.details);
+  }
+});
+
+$("copyJobJsonBtn").addEventListener("click", async () => {
+  if (!state.lastJob) return;
+  await copyText(JSON.stringify(state.lastJob, null, 2));
+  log("Copied job JSON.");
+});
+
+$("copyReportJsonBtn").addEventListener("click", async () => {
+  if (!state.lastReport) return;
+  await copyText(JSON.stringify(state.lastReport, null, 2));
+  log("Copied report JSON.");
+});
+
+$("downloadReportJsonBtn").addEventListener("click", () => {
+  downloadReportJson();
+  log("Report JSON downloaded.");
+});
+
+$("openPrintableBtn").addEventListener("click", () => {
+  openPrintableReport();
+});
+
+refreshActionButtons();
+setStatus("Idle");
+updateRunGate();

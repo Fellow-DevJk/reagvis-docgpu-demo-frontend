@@ -2,6 +2,28 @@
 
 Static demo frontend for presentation/UAT.
 
+## Frontend (UCC portal re-skin)
+
+The UI is a static, **no-build** hash-routed single-page app styled as the UCC
+government portal (adapted from the `react-frontend-migration` design, rebuilt in
+vanilla HTML/CSS/JS — no React, no bundler). The **validation engine**
+(`/validators`, `/workers`) and the **API + report logic** in `app.js` are
+unchanged; only the UI was re-skinned.
+
+- Screens (hash routes): `#/home` → `#/login` → `#/flow` (3-step wizard; step 3
+  is the validator) → `#/confirm`, plus standalone `#/verify`.
+- `ui/router.js` (router + icons), `ui/portal.js` (chrome + screens),
+  `ui/verify.js` (validator wired to the real `ReagvisIntake` engine + the real
+  upload/submit pipeline), `ui/connection.js` (Connection/Dev panel).
+- **Connection panel** (bottom-right "⚙ Connection"): API Base URL + Bearer Token
+  + optional x-origin-verify + Job ID. Runtime-only — never persisted.
+- Flow: select files → **Run verification** (16 real checks, grouped with a
+  pass/fail verdict stamp) → on PASS, **Submit** fires the forensic job and lands
+  on Confirm with a handoff ("you may safely leave"). Confirm offers an optional
+  **View forensic report** (polls the job, renders the styled report + printable
+  PDF + JSON) and **Download intake JSON**.
+- `legacy-vanilla/` holds a snapshot of the previous single-page UI for rollback.
+
 ## What it does
 
 1. Upload up to 10 docs (`pdf/jpg/jpeg/png`)

@@ -3,125 +3,87 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Reagvis DocGPU Demo</title>
+    <title>Reagvis · Uniform Civil Code Portal (Demo)</title>
     <link rel="icon" type="image/png" href="./assets/favicon-brand.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@500&family=Mukta:wght@400;500;600;700&family=Poppins:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <main class="shell">
-      <section class="panel setup">
-        <div class="header-row">
-          <div>
-            <h1>Reagvis Document API Demo</h1>
-            <p class="muted">Upload documents, run a job, fetch report JSON, and generate styled PDF client-side.</p>
-          </div>
-          <span id="statusPill" class="pill">Idle</span>
-        </div>
+    <!-- Router mounts the active screen here -->
+    <main id="app"></main>
 
-        <div class="grid">
-          <label>
-            API Base URL
-            <input id="apiBase" value="https://api.verify.reagvis.com" />
-          </label>
-          <label>
-            Bearer Token
-            <input id="bearer" placeholder="key_xxx.sk_live_xxx (or Bearer key_xxx.sk_live_xxx)" />
-          </label>
-          <label>
-            Optional x-origin-verify
-            <input id="originVerify" placeholder="Only needed for execute-api direct calls" />
-          </label>
-          <label>
-            Job ID (optional)
-            <input id="jobId" placeholder="demo-20260529T123000Z" />
-          </label>
-        </div>
-
-        <label class="file-box">
-          <span>Select Documents (max 10)</span>
-          <input id="files" type="file" multiple accept=".pdf,.jpg,.jpeg,.png" />
-        </label>
-
-        <!--
-          Document intake / validation panel. Compact, user-facing PASS/FAIL state.
-          Technical per-check detail lives inside each card's "View validation details".
-        -->
-        <section id="intakePanel" class="intake" aria-live="polite">
-          <div class="intake-head">
-            <h2>Document Intake</h2>
-            <span id="intakePill" class="pill">No file</span>
-          </div>
-          <p id="intakeHint" class="muted small">Select a document to begin intake checks.</p>
-          <div id="intakeFiles" class="intake-files"></div>
-          <div id="intakeHandoff" class="intake-handoff" hidden></div>
-        </section>
-
-        <div class="actions">
-          <button id="runBtn" disabled title="Select a document and pass intake validation to enable.">Upload + Submit + Poll + Fetch Report</button>
-          <button id="pollBtn" class="secondary">Poll Existing Job</button>
-          <button id="fetchReportBtn" class="ghost">Fetch Report for Job ID</button>
-        </div>
-
+    <!--
+      Persistent Dev Controls / Connection panel. Kept in the static DOM so the
+      element IDs the engine + API core (app.js) capture at load — apiBase,
+      bearer, originVerify, jobId, log, statusPill, jobJson, reportJson — always
+      exist. The Bearer token is runtime-only and never persisted.
+    -->
+    <button id="devTrigger" class="dev-trigger" type="button">⚙ Connection</button>
+    <section id="devPanel" class="dev-panel hidden" aria-label="Connection settings">
+      <button id="devClose" class="close" type="button" aria-label="Close">✕</button>
+      <h4>Connection</h4>
+      <p class="hint">
+        Demo credentials, runtime-only — never stored. The backend must re-validate
+        every accepted document. <span id="statusPill" class="pill">Idle</span>
+      </p>
+      <label>API Base URL
+        <input id="apiBase" value="https://api.verify.reagvis.com" />
+      </label>
+      <label>Bearer Token
+        <input id="bearer" placeholder="key_xxx.sk_live_xxx" autocomplete="off" />
+      </label>
+      <label>x-origin-verify (optional)
+        <input id="originVerify" placeholder="only for execute-api direct calls" />
+      </label>
+      <label>Job ID (optional)
+        <input id="jobId" placeholder="demo-20260611T..." />
+      </label>
+      <details>
+        <summary>Activity log</summary>
         <pre id="log" class="log"></pre>
-      </section>
+      </details>
+      <details>
+        <summary>Raw JSON (job / report)</summary>
+        <pre id="jobJson">Run a job to view response.</pre>
+        <pre id="reportJson">Fetch a report to view response.</pre>
+      </details>
+    </section>
 
-      <section class="panel responses">
-        <div class="section-head">
-          <h2>API Output</h2>
-          <div class="row-actions">
-            <button id="copyJobJsonBtn" class="ghost" disabled>Copy Job JSON</button>
-            <button id="copyReportJsonBtn" class="ghost" disabled>Copy Report JSON</button>
-            <button id="downloadReportJsonBtn" class="ghost" disabled>Download Report JSON</button>
-            <button id="openPrintableBtn" class="secondary" disabled>Open Printable Report (Save as PDF)</button>
-          </div>
-        </div>
-
-        <div class="two-col">
-          <article>
-            <h3>GET /jobs/{jobId}</h3>
-            <pre id="jobJson" class="json">Run a job to view response.</pre>
-          </article>
-          <article>
-            <h3>GET /jobs/{jobId}/report</h3>
-            <pre id="reportJson" class="json">Fetch a report to view response.</pre>
-          </article>
-        </div>
-      </section>
-
-      <section class="panel preview">
-        <div class="section-head">
-          <h2>Styled Report Preview</h2>
-          <span class="muted small">Template aligned with demo report layout</span>
-        </div>
-        <iframe id="reportFrame" title="Forensic Report Preview"></iframe>
-      </section>
-    </main>
+    <!-- Global demo banner (all screens) -->
+    <div id="demoBanner" class="demo-banner">
+      <strong>DEMO</strong> — Built for internal demonstration only. Not affiliated with any
+      government. No data is transmitted or stored beyond this session.
+      <button id="demoBannerClose" type="button" aria-label="Dismiss">✕</button>
+    </div>
 
     <!--
       Intake validation libraries (CDN, classic UMD builds — static-host friendly).
-      PDF.js MUST stay on v3.11.174 legacy: it is the last release shipping a classic
-      <script>-loadable UMD build (v4+ is ESM-only). The worker URL is pinned to the
-      same version inside validators/document-intake.js. No API tokens are exposed to
-      these libraries or to the validation worker — they only ever see file pixels.
-
-      CSP NOTE: default GitHub Pages sets no restrictive Content-Security-Policy, so
-      these loads work as-is. If a CSP is ever added, it MUST allow cdn.jsdelivr.net
-      (and the Tesseract core/lang CDN it auto-fetches) in script-src, worker-src,
-      and connect-src — or self-host the libs + pdf.worker + tessdata to drop the
-      cross-origin dependency entirely.
+      PDF.js stays on v3.11.174 legacy (last classic <script> UMD; v4+ is ESM-only).
+      No tokens are exposed to these libraries or the validation worker.
+      CSP note: if a CSP is added it must allow cdn.jsdelivr.net (+ the Tesseract
+      CDN) in script-src, worker-src and connect-src.
     -->
     <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/tesseract.min.js"></script>
 
-    <!-- Client-side intake validation layer (load before app.js orchestration) -->
+    <!-- Validation engine (unchanged) -->
     <script src="./validators/config.js"></script>
     <script src="./validators/image-quality.js"></script>
     <script src="./validators/ocr.js"></script>
     <script src="./validators/document-intake.js"></script>
 
+    <!-- API + report core (unchanged logic) -->
     <script src="./app.js"></script>
+
+    <!-- Portal UI (re-skin): router, chrome/screens, validator, connection panel -->
+    <script src="./ui/router.js"></script>
+    <script src="./ui/connection.js"></script>
+    <script src="./ui/verify.js"></script>
+    <script src="./ui/portal.js"></script>
   </body>
 </html>
