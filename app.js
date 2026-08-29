@@ -112,6 +112,10 @@ function isRetryableSubmitError(err) {
   );
 }
 
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function submitJobWithScannerRetry(apiBase, bearer, originVerify, jobId, docs, options = {}) {
   const maxAttempts = Math.max(1, Number(options.maxAttempts || 7));
   const delaysMs = options.delaysMs || [3000, 5000, 8000, 12000, 16000, 20000];
@@ -127,7 +131,7 @@ async function submitJobWithScannerRetry(apiBase, bearer, originVerify, jobId, d
       const delayMs = delaysMs[Math.min(attempt - 1, delaysMs.length - 1)];
       if (onRetry) onRetry({ attempt, nextAttempt: attempt + 1, maxAttempts, delayMs, status: responseStatus(err) });
       log(`Submit is waiting for upload scan finalization; retry ${attempt + 1}/${maxAttempts} in ${Math.round(delayMs / 1000)}s.`);
-      await delay(delayMs);
+      await sleepMs(delayMs);
     }
   }
 
