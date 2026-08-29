@@ -1411,7 +1411,7 @@ function buildComplianceReportHtml(confirm = {}) {
       line-height: 1.45;
     }
     .page {
-      max-width: 960px;
+      max-width: 1120px;
       margin: 0 auto;
       background: var(--paper);
       min-height: 100vh;

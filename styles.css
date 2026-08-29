@@ -763,7 +763,7 @@ a {
 
 /* ---- Confirm ---- */
 .confirm-wrap {
-  max-width: 640px;
+  max-width: min(1180px, calc(100vw - 48px));
   margin: 0 auto;
   padding: 56px 16px;
   display: flex;
@@ -789,6 +789,7 @@ a {
 }
 .ref-card {
   width: 100%;
+  max-width: 720px;
   background: var(--p-panel);
   border: 1px solid var(--p-rule);
   border-radius: 10px;
@@ -1412,10 +1413,22 @@ a {
 /* report styled preview iframe (backend forensic report) */
 .report-frame {
   width: 100%;
-  min-height: 720px;
+  min-height: 920px;
+  height: min(86vh, 1040px);
   border: 1px solid var(--rule);
   border-radius: var(--radius-sm);
   background: #fff;
+}
+
+@media (max-width: 760px) {
+  .confirm-wrap {
+    max-width: 100%;
+    padding: 44px 14px;
+  }
+  .report-frame {
+    min-height: 720px;
+    height: 76vh;
+  }
 }
 
 /* indeterminate analyzing bar */
