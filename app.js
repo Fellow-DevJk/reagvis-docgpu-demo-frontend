@@ -4,6 +4,7 @@ const state = {
   lastJob: null,
   lastReport: null,
   reportHtml: "",
+  complianceReportHtml: "",
   // Client-side document intake validation state (UX gate before upload).
   //   status: "idle" | "running" | "passed" | "failed"
   validation: { status: "idle", files: [], overall: null, errors: [] },
@@ -1361,6 +1362,364 @@ async function handleFetchedReport(report) {
  * report fetch) now lives in ui/verify.js, calling the core functions above.
  * The API + report-building logic above is unchanged. */
 
+function complianceRow(label, status, coverage, note) {
+  return `
+    <tr>
+      <td>${escapeHtml(label)}</td>
+      <td><span class="status ${escapeHtml(status.tone)}">${escapeHtml(status.label)}</span></td>
+      <td><strong>${escapeHtml(coverage)}</strong></td>
+      <td>${escapeHtml(note)}</td>
+    </tr>
+  `;
+}
+
+function buildComplianceReportHtml(confirm = {}) {
+  const now = new Date();
+  const fileCount = Math.max(1, Number(confirm.fileCount || 1));
+  const generatedOn = now.toLocaleString("en-IN", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  const reference = confirm.ref || "RV-DEMO-COMPLIANCE";
+  const jobId = confirm.jobId || "demo-compliance-job";
+  const primaryFile = confirm.fileName || "institutional-document-set.zip";
+  const inferredScale = Math.max(fileCount, 100);
+
+  const complianceStyles = `
+    :root {
+      --ink: #172033;
+      --muted: #5d6b82;
+      --line: #d8e0ea;
+      --paper: #fffdf8;
+      --teal: #0f766e;
+      --gold: #b7791f;
+      --green: #0f7a4d;
+      --amber: #9a6200;
+      --red: #9f1239;
+      --blue: #1d4ed8;
+    }
+    @page { size: A4; margin: 12mm; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #e9edf2;
+      color: var(--ink);
+      font-family: "Georgia", "Times New Roman", serif;
+      line-height: 1.45;
+    }
+    .page {
+      max-width: 960px;
+      margin: 0 auto;
+      background: var(--paper);
+      min-height: 100vh;
+      box-shadow: 0 24px 70px rgba(23, 32, 51, 0.18);
+    }
+    .content { padding: 34px 42px 30px; }
+    .topline {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      border-bottom: 3px solid var(--teal);
+      padding-bottom: 18px;
+      margin-bottom: 22px;
+    }
+    .brand { display: flex; gap: 14px; align-items: center; }
+    .seal {
+      width: 54px;
+      height: 54px;
+      border: 2px solid var(--teal);
+      border-radius: 18px;
+      display: grid;
+      place-items: center;
+      color: var(--teal);
+      font: 800 22px/1 sans-serif;
+      background: #ecfdf5;
+    }
+    h1 {
+      margin: 0;
+      font-size: 30px;
+      letter-spacing: -0.02em;
+    }
+    .subtitle {
+      margin-top: 5px;
+      color: var(--muted);
+      font-family: Arial, sans-serif;
+      font-size: 12px;
+      max-width: 560px;
+    }
+    .meta {
+      min-width: 260px;
+      font-family: Arial, sans-serif;
+      font-size: 11px;
+      color: var(--muted);
+      text-align: right;
+    }
+    .meta strong {
+      display: block;
+      color: var(--ink);
+      font-size: 12px;
+      margin-bottom: 4px;
+      word-break: break-all;
+    }
+    .notice {
+      border: 1px solid #f2d39a;
+      background: #fff7e6;
+      color: #6b4600;
+      border-radius: 14px;
+      padding: 12px 14px;
+      font-family: Arial, sans-serif;
+      font-size: 12px;
+      margin-bottom: 20px;
+    }
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-bottom: 22px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 14px;
+      background: #ffffff;
+      min-height: 110px;
+    }
+    .label {
+      color: var(--muted);
+      font-family: Arial, sans-serif;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.11em;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+    .value {
+      font-family: Georgia, serif;
+      font-size: 26px;
+      font-weight: 800;
+      color: var(--teal);
+    }
+    .note {
+      color: var(--muted);
+      font-family: Arial, sans-serif;
+      font-size: 11px;
+      margin-top: 6px;
+    }
+    h2 {
+      font-size: 19px;
+      margin: 24px 0 8px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--line);
+    }
+    p {
+      color: var(--muted);
+      font-family: Arial, sans-serif;
+      font-size: 12px;
+      margin: 0 0 12px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      overflow: hidden;
+      font-family: Arial, sans-serif;
+      font-size: 12px;
+    }
+    th {
+      background: #eef8f6;
+      color: #134e4a;
+      text-align: left;
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    th, td {
+      padding: 12px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+    tr:last-child td { border-bottom: 0; }
+    .status {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 5px 9px;
+      font-size: 10px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .ok { background: #dcfce7; color: var(--green); }
+    .warn { background: #fef3c7; color: var(--amber); }
+    .bad { background: #ffe4e6; color: var(--red); }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .finding {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 13px 14px;
+      background: #fff;
+      font-family: Arial, sans-serif;
+      font-size: 12px;
+    }
+    .finding strong {
+      display: block;
+      color: var(--ink);
+      margin-bottom: 5px;
+    }
+    .footer {
+      margin-top: 24px;
+      padding-top: 12px;
+      border-top: 1px solid var(--line);
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      color: var(--muted);
+      font-family: Arial, sans-serif;
+      font-size: 10px;
+    }
+    .mono { font-family: "Courier New", monospace; }
+    @media print {
+      body { background: #fff; }
+      .page { box-shadow: none; }
+    }
+  `;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NAAC/NBA Compliance Readiness Report</title>
+  <style>${complianceStyles}</style>
+</head>
+<body>
+  <main class="page">
+    <div class="content">
+      <section class="topline">
+        <div class="brand">
+          <div class="seal">RV</div>
+          <div>
+            <h1>NAAC/NBA Compliance Readiness Report</h1>
+            <div class="subtitle">Institutional evidence review across uploaded marksheets, CO/PO records, assessment files, faculty records, accounts, and supporting accreditation documents.</div>
+          </div>
+        </div>
+        <div class="meta">
+          <strong>${escapeHtml(reference)}</strong>
+          Job: <span class="mono">${escapeHtml(jobId)}</span><br />
+          Generated: ${escapeHtml(generatedOn)}<br />
+          Source package: ${escapeHtml(primaryFile)}${fileCount > 1 ? ` + ${fileCount - 1} more` : ""}
+        </div>
+      </section>
+
+      <div class="notice">
+        Demo artifact for video walkthrough. This static report illustrates the target compliance output format and does not represent an official accreditation judgement.
+      </div>
+
+      <section class="summary">
+        <div class="card">
+          <div class="label">Readiness</div>
+          <div class="value">82%</div>
+          <div class="note">Overall documentation readiness from sampled evidence.</div>
+        </div>
+        <div class="card">
+          <div class="label">Evidence Coverage</div>
+          <div class="value">71/86</div>
+          <div class="note">Required evidence points found or partially supported.</div>
+        </div>
+        <div class="card">
+          <div class="label">Documents Reviewed</div>
+          <div class="value">${escapeHtml(String(fileCount))}</div>
+          <div class="note">Demo can represent a larger ${escapeHtml(String(inferredScale))}+ file institutional folder.</div>
+        </div>
+        <div class="card">
+          <div class="label">Priority Gaps</div>
+          <div class="value">5</div>
+          <div class="note">Items to resolve before submission readiness.</div>
+        </div>
+      </section>
+
+      <h2>Requirement Coverage</h2>
+      <p>Compliance checks focus on whether uploaded evidence is present, internally consistent, and traceable to expected NAAC/NBA accreditation artifacts.</p>
+      <table>
+        <thead>
+          <tr>
+            <th>Accreditation Area</th>
+            <th>Status</th>
+            <th>Coverage</th>
+            <th>Finding</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${complianceRow("Course Outcomes and Program Outcomes", { label: "Partial", tone: "warn" }, "84%", "CO/PO mapping exists for most courses, but signed attainment rationale is incomplete for two sampled departments.")}
+          ${complianceRow("Question Papers and Assessment Mapping", { label: "Satisfied", tone: "ok" }, "91%", "Question papers are available and most assessment items are traceable to declared Course Outcomes.")}
+          ${complianceRow("Student Marksheets and Attainment Evidence", { label: "Satisfied", tone: "ok" }, "89%", "Semester marksheets support outcome-attainment calculations, with minor normalization gaps in uploaded naming.")}
+          ${complianceRow("Faculty and Institution Records", { label: "Needs Action", tone: "warn" }, "76%", "Three sampled faculty records are missing appointment or workload evidence needed for audit traceability.")}
+          ${complianceRow("Accounts, Bills, and Financial Records", { label: "Partial", tone: "warn" }, "68%", "Bills are present, but approval-chain references and invoice-to-ledger links are incomplete.")}
+          ${complianceRow("Document Integrity and Forensics", { label: "Flagged", tone: "bad" }, "Review", "One uploaded document requires forensic review before the compliance packet should be treated as submission-ready.")}
+        </tbody>
+      </table>
+
+      <h2>Cross-Document Compliance Findings</h2>
+      <div class="grid">
+        <div class="finding">
+          <strong>CO/PO Attainment Trace</strong>
+          Around 300 course outcomes were sampled in the demo narrative. 290 are treated as achieved or traceable; the remaining outcomes need evidence clarification.
+        </div>
+        <div class="finding">
+          <strong>Missing Evidence</strong>
+          Missing items include signed CO-PO mapping sheets, faculty workload proof, bill approval trail, and two supporting departmental records.
+        </div>
+        <div class="finding">
+          <strong>Evaluator Sampling Risk</strong>
+          The report highlights areas that could be missed by manual random sampling during an accreditation visit.
+        </div>
+        <div class="finding">
+          <strong>Forensic Integrity Note</strong>
+          Compliance readiness should not be released until machine-flagged manipulated documents are resolved by the verification review workflow.
+        </div>
+      </div>
+
+      <h2>Recommended Action Plan</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Priority</th>
+            <th>Action</th>
+            <th>Owner</th>
+            <th>Expected Outcome</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td><span class="status bad">P0</span></td><td>Resolve the forensic exception before external submission.</td><td>Compliance office + verification reviewer</td><td>Prevents manipulated evidence entering the final packet.</td></tr>
+          <tr><td><span class="status warn">P1</span></td><td>Attach signed CO/PO mapping sheets for incomplete departments.</td><td>Academic coordinator</td><td>Improves outcome-attainment traceability.</td></tr>
+          <tr><td><span class="status warn">P1</span></td><td>Link accounts bills to approval and ledger records.</td><td>Accounts office</td><td>Reduces financial evidence ambiguity.</td></tr>
+          <tr><td><span class="status ok">P2</span></td><td>Normalize document naming and folder taxonomy.</td><td>Accreditation cell</td><td>Makes future audits searchable and repeatable.</td></tr>
+        </tbody>
+      </table>
+
+      <section class="footer">
+        <div>Prepared by Reagvis Verify demo stack · Compliance Automation + Document Verification + Forensics</div>
+        <div>Policy: <span class="mono">NAAC-NBA-DEMO-001</span></div>
+      </section>
+    </div>
+  </main>
+</body>
+</html>`;
+}
+
+function prepareComplianceReport(confirm = {}) {
+  state.complianceReportHtml = buildComplianceReportHtml(confirm);
+  return state.complianceReportHtml;
+}
+
 function openPrintableReport() {
   if (!state.reportHtml) return;
 
@@ -1413,6 +1772,57 @@ function openPrintableReport() {
   setTimeout(() => URL.revokeObjectURL(url), 120000);
 }
 
+function openPrintableComplianceReport() {
+  if (!state.complianceReportHtml) return;
+
+  const headStyle = `
+    <style id="__print-style">
+      @media print {
+        #__pdf-bar, #__pdf-spacer { display: none !important; }
+        * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+      }
+    </style>
+  `;
+
+  const bar = `
+    <div id="__pdf-bar" style="position:fixed;top:0;left:0;right:0;z-index:99999;display:flex;align-items:center;justify-content:space-between;background:#0f766e;color:#fff;padding:10px 20px;font-family:sans-serif;font-size:13px;gap:12px;box-shadow:0 2px 8px rgba(0,0,0,.4);">
+      <span style="opacity:.9;">reagvis-compliance-report-${escapeHtml(state.lastJob?.jobId || "demo")}.pdf</span>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span style="font-size:11px;opacity:.78;">Destination: <strong style="color:#fde68a;">Save as PDF</strong> | Background graphics: <strong style="color:#fde68a;">ON</strong></span>
+        <button id="__print-btn" style="background:#b7791f;color:#fff;border:none;padding:8px 22px;border-radius:7px;font-size:13px;font-weight:700;cursor:pointer;">Save as PDF</button>
+        <button id="__close-btn" style="background:rgba(255,255,255,0.15);color:#fff;border:none;width:32px;height:32px;border-radius:6px;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;">&#x2715;</button>
+      </div>
+    </div>
+    <div id="__pdf-spacer" style="height:52px;"></div>
+    <script>
+      document.getElementById('__print-btn').addEventListener('click', function() {
+        document.getElementById('__pdf-bar').style.display = 'none';
+        document.getElementById('__pdf-spacer').style.display = 'none';
+        window.print();
+        document.getElementById('__pdf-bar').style.display = 'flex';
+        document.getElementById('__pdf-spacer').style.display = 'block';
+      });
+      document.getElementById('__close-btn').addEventListener('click', function() {
+        window.open('', '_self');
+        window.close();
+      });
+    <\/script>
+  `;
+
+  const fullHtml = state.complianceReportHtml
+    .replace("</head>", `${headStyle}</head>`)
+    .replace("</body>", `${bar}</body>`);
+
+  const blob = new Blob([fullHtml], { type: "text/html;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const w = window.open(url, "_blank");
+  if (!w) {
+    log("Popup blocked by browser. Allow popups and retry.");
+    return;
+  }
+  setTimeout(() => URL.revokeObjectURL(url), 120000);
+}
+
 function downloadReportJson() {
   if (!state.lastReport) return;
   const blob = new Blob([JSON.stringify(state.lastReport, null, 2)], { type: "application/json;charset=utf-8" });
@@ -1427,3 +1837,5 @@ function downloadReportJson() {
 }
 
 window.ReagvisState = state;
+window.prepareComplianceReport = prepareComplianceReport;
+window.openPrintableComplianceReport = openPrintableComplianceReport;

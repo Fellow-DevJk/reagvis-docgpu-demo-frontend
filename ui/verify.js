@@ -490,5 +490,11 @@
   };
 
   V.openPrintable = function () { global.openPrintableReport && global.openPrintableReport(); };
+  V.prepareComplianceReport = function () {
+    return global.prepareComplianceReport ? global.prepareComplianceReport(UI.store.confirm || {}) : "";
+  };
+  V.openPrintableCompliance = function () {
+    global.openPrintableComplianceReport && global.openPrintableComplianceReport();
+  };
   V.downloadReportJson = function () { global.downloadReportJson && global.downloadReportJson(); };
 })(window);

@@ -268,6 +268,7 @@
       "</div>" +
       '<div class="cta" style="justify-content:center;flex-wrap:wrap">' +
       '<button class="btn btn-teal-outline" id="cfReport">View forensic report</button>' +
+      '<button class="btn btn-teal-outline" id="cfCompliance">View Compliance Report</button>' +
       '<button class="btn btn-teal-outline" id="cfJson">Download intake JSON</button>' +
       '<a class="btn btn-teal-outline" href="#/flow">Verify Another</a>' +
       '<a class="btn btn-teal" href="#/home">Return Home</a>' +
@@ -389,7 +390,22 @@
     const jsonBtn = document.getElementById("cfJson");
     if (jsonBtn) jsonBtn.addEventListener("click", function () { UI.verify.downloadReportJson(); });
     const repBtn = document.getElementById("cfReport");
+    const compBtn = document.getElementById("cfCompliance");
     const area = document.getElementById("cfReportArea");
+    if (compBtn && area) {
+      compBtn.addEventListener("click", function () {
+        compBtn.disabled = true;
+        compBtn.textContent = "Compliance loaded";
+        const html = UI.verify.prepareComplianceReport();
+        area.innerHTML =
+          '<div style="display:flex;gap:10px;justify-content:center;align-items:center;flex-wrap:wrap;margin:12px 0">' +
+          '<button class="btn btn-teal-outline" id="cfCompliancePrint">Open printable compliance report</button>' +
+          '<span style="color:var(--p-subtle);font-size:12px">Static NAAC/NBA demo report, generated locally for this submission.</span></div>' +
+          '<iframe class="report-frame" srcdoc="' + esc(html) + '"></iframe>';
+        const pr = document.getElementById("cfCompliancePrint");
+        if (pr) pr.addEventListener("click", function () { UI.verify.openPrintableCompliance(); });
+      });
+    }
     if (repBtn && area) {
       repBtn.addEventListener("click", async function () {
         repBtn.disabled = true;
