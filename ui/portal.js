@@ -395,9 +395,10 @@
         repBtn.disabled = true;
         repBtn.textContent = "Fetching report…";
         area.innerHTML = '<div class="indet" style="margin:16px 0"><i></i></div>' +
-          '<p style="color:var(--p-subtle);font-size:13px">Polling the forensic job (up to 10 min)…</p>';
+          '<p style="color:var(--p-subtle);font-size:13px">Polling the forensic job (up to 2 min)…</p>';
         const res = await UI.verify.fetchForensicReport(function (st) {
           if (st === "poll") area.querySelector("p").textContent = "Polling… still processing.";
+          if (st === "pending") area.querySelector("p").textContent = "The job is accepted but still pending tenant-visible completion.";
         });
         if (res.ok) {
           area.innerHTML =
@@ -408,8 +409,11 @@
           if (pr) pr.addEventListener("click", function () { UI.verify.openPrintable(); });
           repBtn.textContent = "Report loaded";
         } else {
-          area.innerHTML = '<p style="color:var(--p-danger)">Report not ready (job ' +
-            ((res.job && res.job.status) || "unavailable") + "). Try again shortly.</p>";
+          var isPending = res.reason === "still-processing";
+          area.innerHTML = '<p style="color:' + (isPending ? 'var(--p-subtle)' : 'var(--p-danger)') + '">Report not ready (job ' +
+            ((res.job && res.job.status) || "unavailable") + "). " +
+            (isPending ? "The job was submitted successfully; try again later with the same job ID." : "Try again shortly.") +
+            "</p>";
           repBtn.disabled = false;
           repBtn.textContent = "View forensic report";
         }

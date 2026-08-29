@@ -460,6 +460,9 @@
   }
 
   // ---------- optional forensic report (poll + fetch + render) ----------
+  const REPORT_POLL_ATTEMPTS = 24;
+  const REPORT_POLL_INTERVAL_MS = 5000;
+
   V.fetchForensicReport = async function (onState) {
     const c = UI.store.confirm;
     if (!c) return { ok: false };
@@ -467,16 +470,17 @@
     onState && onState("polling");
     global.setStatus && global.setStatus("Processing", "warn");
     let last = null;
-    for (let i = 0; i < 120; i++) {
-      await new Promise(function (r) { setTimeout(r, 5000); });
+    for (let i = 0; i < REPORT_POLL_ATTEMPTS; i++) {
+      await new Promise(function (r) { setTimeout(r, REPORT_POLL_INTERVAL_MS); });
       last = await global.pollJob(conn.apiBase, conn.bearer, conn.originVerify, c.jobId);
       onState && onState("poll", last);
       if (last.status === "COMPLETED" || last.status === "FAILED") break;
     }
     if (!last || last.status !== "COMPLETED") {
-      global.setStatus && global.setStatus(String((last && last.status) || "FAILED"), "bad");
-      onState && onState("failed", last);
-      return { ok: false, job: last };
+      const status = String((last && last.status) || "PROCESSING");
+      global.setStatus && global.setStatus(status, status === "FAILED" ? "bad" : "warn");
+      onState && onState(status === "FAILED" ? "failed" : "pending", last);
+      return { ok: false, reason: status === "FAILED" ? "failed" : "still-processing", job: last };
     }
     const report = await global.fetchReport(conn.apiBase, conn.bearer, conn.originVerify, c.jobId, false);
     await global.handleFetchedReport(report); // sets ReagvisState.reportHtml
