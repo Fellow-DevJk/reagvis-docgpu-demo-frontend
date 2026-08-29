@@ -393,13 +393,25 @@
       global.setStatus && global.setStatus("Submitting", "warn");
       let submitResp;
       try {
-        submitResp = await global.submitJob(conn.apiBase, conn.bearer, conn.originVerify, jobId, docs);
+        submitResp = await global.submitJobWithScannerRetry(conn.apiBase, conn.bearer, conn.originVerify, jobId, docs, {
+          onRetry: function (retry) {
+            global.setStatus && global.setStatus("Scanning uploads", "warn");
+            global.log &&
+              global.log("Submit retry scheduled:", {
+                jobId: jobId,
+                nextAttempt: retry.nextAttempt,
+                maxAttempts: retry.maxAttempts,
+                delayMs: retry.delayMs,
+                status: retry.status,
+              });
+          },
+        });
       } catch (err) {
         // Job-id collision: retry once with a brand-new id, reusing the
         // already-uploaded documents.
         if (is409(err)) {
           jobId = global.makeJobId();
-          submitResp = await global.submitJob(conn.apiBase, conn.bearer, conn.originVerify, jobId, docs);
+          submitResp = await global.submitJobWithScannerRetry(conn.apiBase, conn.bearer, conn.originVerify, jobId, docs);
         } else {
           throw err;
         }
@@ -437,6 +449,10 @@
   }
   function submitErrorMessage(err) {
     const st = err && err.details && err.details.response && err.details.response.status;
+    const body = String((err && err.details && err.details.response && err.details.response.bodyText) || "").toLowerCase();
+    if ((st === 403 && body.includes("document upload has not passed scanning policy")) || st === 502 || st === 503 || st === 504) {
+      return "Uploaded documents are still being finalized by the scanner. Wait a moment and submit again; do not re-upload.";
+    }
     if (st === 401 || st === 403) return "Authentication failed — check the Bearer Token in the Connection panel.";
     if (st === 409) return "This job already exists. Please try submitting again.";
     if (st) return "Submission failed (HTTP " + st + "). See the Connection panel → Activity log for details.";

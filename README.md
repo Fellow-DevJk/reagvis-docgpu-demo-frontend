@@ -94,3 +94,6 @@ rather than blocking the demo.
 - If your hosting origin is not CORS-allowed by backend, browser calls fail.
 - The demo renders report from `/jobs/{jobId}/report` JSON (operator view), not portal-only internals.
 - First OCR run downloads the Tesseract English language data (a few MB); it is then cached.
+- After upload, the backend scanner may still be finalizing S3 metadata. The submit
+  flow retries `POST /jobs` with the same uploaded S3 URIs for retryable scanner
+  pending / transient gateway responses; it does not re-upload files.

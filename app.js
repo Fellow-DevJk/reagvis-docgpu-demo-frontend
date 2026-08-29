@@ -93,6 +93,47 @@ function buildApiError(label, resp, bodyText, requestMeta = {}) {
   return err;
 }
 
+function responseBodyText(err) {
+  return String(err?.details?.response?.bodyText || "");
+}
+
+function responseStatus(err) {
+  return err?.details?.response?.status || 0;
+}
+
+function isRetryableSubmitError(err) {
+  const status = responseStatus(err);
+  const body = responseBodyText(err).toLowerCase();
+  return (
+    status === 502 ||
+    status === 503 ||
+    status === 504 ||
+    (status === 403 && body.includes("document upload has not passed scanning policy"))
+  );
+}
+
+async function submitJobWithScannerRetry(apiBase, bearer, originVerify, jobId, docs, options = {}) {
+  const maxAttempts = Math.max(1, Number(options.maxAttempts || 7));
+  const delaysMs = options.delaysMs || [3000, 5000, 8000, 12000, 16000, 20000];
+  const onRetry = typeof options.onRetry === "function" ? options.onRetry : null;
+  let lastErr = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await submitJob(apiBase, bearer, originVerify, jobId, docs);
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryableSubmitError(err) || attempt >= maxAttempts) throw err;
+      const delayMs = delaysMs[Math.min(attempt - 1, delaysMs.length - 1)];
+      if (onRetry) onRetry({ attempt, nextAttempt: attempt + 1, maxAttempts, delayMs, status: responseStatus(err) });
+      log(`Submit is waiting for upload scan finalization; retry ${attempt + 1}/${maxAttempts} in ${Math.round(delayMs / 1000)}s.`);
+      await delay(delayMs);
+    }
+  }
+
+  throw lastErr || new Error("submit failed after scanner retry window");
+}
+
 function safeJson(v, fallback = {}) {
   try {
     return JSON.parse(v);
