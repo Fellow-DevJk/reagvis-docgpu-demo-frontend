@@ -1619,10 +1619,6 @@ function buildComplianceReportHtml(confirm = {}) {
         </div>
       </section>
 
-      <div class="notice">
-        Demo artifact for video walkthrough. This static report illustrates the target compliance output format and does not represent an official accreditation judgement.
-      </div>
-
       <section class="summary">
         <div class="card">
           <div class="label">Readiness</div>
