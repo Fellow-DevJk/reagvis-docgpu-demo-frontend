@@ -1,8 +1,8 @@
 /* =====================================================================
- * Reagvis DocGPU Demo — UCC portal re-skin (static, no build)
+ * Reagvis DocGPU Demo — government portal re-skin (static, no build)
  * ---------------------------------------------------------------------
  * Two scoped visual systems, faithfully recreated from the React branch:
- *   .portal    — UCC government portal chrome (teal, Poppins/Mukta)
+ *   .portal    — government portal chrome (teal, Poppins/Mukta)
  *   .validator — Reagvis Verify validator (cream/orange, IBM Plex)
  * The validation engine (/validators, /workers) and the API + report logic
  * in app.js are unchanged — this file only restyles the UI.
@@ -32,8 +32,8 @@
   --seal-red-bg: #f5e8e6;
   --seal-amber: #9a6212;
   --seal-amber-bg: #f5efe0;
-  --ucc-teal: #1c6b68;
-  --ucc-teal-dark: #134e4a;
+  --gov-teal: #1c6b68;
+  --gov-teal-dark: #134e4a;
 
   /* portal chrome palette */
   --p-teal: #15706b;
@@ -121,7 +121,7 @@ a {
   min-height: 100vh;
 }
 
-.ucc-utility {
+.gov-utility {
   background: var(--p-teal-dark);
   color: rgba(255, 255, 255, 0.78);
   font-size: 11px;
@@ -131,12 +131,12 @@ a {
   justify-content: space-between;
   padding: 0 16px;
 }
-.ucc-utility .acc {
+.gov-utility .acc {
   display: inline-flex;
   align-items: center;
   gap: 8px;
 }
-.ucc-utility .acc button {
+.gov-utility .acc button {
   background: transparent;
   border: 0;
   color: rgba(255, 255, 255, 0.78);
@@ -144,16 +144,17 @@ a {
   border-radius: 2px;
   line-height: 1;
 }
-.ucc-utility .acc button[aria-pressed="true"] {
+.gov-utility .acc button[aria-pressed="true"] {
   background: rgba(255, 255, 255, 0.15);
   color: #fff;
 }
 
-.ucc-header {
-  background: var(--p-teal);
-  color: #fff;
+.gov-header {
+  background: #fff;
+  color: var(--p-teal);
+  border-bottom: 2px solid var(--p-teal);
 }
-.ucc-header .inner {
+.gov-header .inner {
   max-width: 1200px;
   margin: 0 auto;
   padding: 12px 16px;
@@ -162,68 +163,73 @@ a {
   justify-content: space-between;
   gap: 16px;
 }
-.ucc-brand {
+.gov-brand {
   display: flex;
   align-items: center;
   gap: 12px;
   text-decoration: none;
-  color: #fff;
+  color: var(--p-teal);
 }
-.ucc-brand .emblem {
+.gov-brand .emblem-img {
+  height: 64px;
+  width: auto;
+  flex: 0 0 auto;
+}
+.gov-brand .emblem {
   width: 52px;
   height: 52px;
   flex: 0 0 auto;
 }
-.ucc-brand .title-hi {
+.gov-brand .title-hi {
   font-family: var(--font-mukta);
   font-weight: 700;
-  font-size: 18px;
-  line-height: 1.1;
+  font-size: 22px;
+  line-height: 1.2;
 }
-.ucc-brand .title-en {
-  font-size: 11px;
-  font-weight: 500;
-  color: rgba(255, 255, 255, 0.8);
+.gov-brand .title-en {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--p-teal);
 }
-.ucc-brand .title-note {
+.gov-brand .title-note {
   font-size: 9px;
   color: rgba(255, 255, 255, 0.5);
 }
-.ucc-nav {
+.gov-nav {
   display: flex;
   align-items: center;
   gap: 18px;
 }
-.ucc-nav a {
+.gov-nav a {
   font-size: 13px;
   font-weight: 500;
-  color: rgba(255, 255, 255, 0.85);
+  color: var(--p-teal);
   text-decoration: none;
 }
-.ucc-nav a:hover {
-  color: #fff;
+.gov-nav a:hover {
+  text-decoration: underline;
 }
 .btn-login {
-  background: #fff;
-  color: var(--p-teal);
+  background: var(--p-teal);
+  color: #fff !important;
   border: 1.5px solid #fff;
   border-radius: var(--radius);
   padding: 7px 16px;
   font-weight: 600;
   font-size: 13px;
 }
-.ucc-header .welcome {
+.gov-header .welcome {
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.75);
+  color: var(--p-teal);
   display: inline-flex;
   gap: 14px;
   align-items: center;
 }
-.ucc-header .welcome a {
+.gov-header .welcome a {
   text-decoration: none;
 }
 @media (max-width: 900px) {
-  .ucc-nav a {
+  .gov-nav a {
     display: none;
   }
 }
@@ -472,7 +478,7 @@ a {
   flex: 1;
   min-height: 0;
 }
-.ucc-sidebar {
+.gov-sidebar {
   width: 220px;
   flex: 0 0 auto;
   background: var(--p-panel);
@@ -484,13 +490,13 @@ a {
   align-self: flex-start;
   height: 100vh;
 }
-.ucc-sidebar nav {
+.gov-sidebar nav {
   display: flex;
   flex-direction: column;
   padding: 8px;
   gap: 2px;
 }
-.ucc-sidebar a {
+.gov-sidebar a {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -501,13 +507,13 @@ a {
   border-radius: var(--radius);
   border-left: 3px solid transparent;
 }
-.ucc-sidebar a.active {
+.gov-sidebar a.active {
   color: var(--p-teal);
   background: var(--p-teal-tint);
   border-left-color: var(--p-teal);
   font-weight: 600;
 }
-.ucc-sidebar .badge {
+.gov-sidebar .badge {
   margin-left: auto;
   background: var(--p-accent);
   color: #fff;
@@ -515,11 +521,11 @@ a {
   border-radius: var(--radius-pill);
   padding: 1px 7px;
 }
-.ucc-sidebar .badge.zero {
+.gov-sidebar .badge.zero {
   background: #d1d5db;
   color: #6b7280;
 }
-.ucc-sidebar .who {
+.gov-sidebar .who {
   margin-top: auto;
   border-top: 1px solid var(--p-rule);
   padding: 12px;
@@ -528,7 +534,7 @@ a {
   gap: 10px;
   font-size: 12px;
 }
-.ucc-sidebar .who .av {
+.gov-sidebar .who .av {
   width: 32px;
   height: 32px;
   border-radius: var(--radius-pill);
@@ -539,7 +545,7 @@ a {
   font-weight: 600;
 }
 @media (max-width: 900px) {
-  .ucc-sidebar {
+  .gov-sidebar {
     display: none;
   }
 }
@@ -713,7 +719,7 @@ a {
   color: var(--p-subtle);
 }
 
-.ucc-footer {
+.gov-footer {
   border-top: 1px solid var(--p-rule);
   background: var(--p-panel);
   padding: 12px 24px;
@@ -721,7 +727,7 @@ a {
   justify-content: space-between;
   gap: 12px;
 }
-.ucc-footer .right {
+.gov-footer .right {
   display: flex;
   gap: 10px;
 }
@@ -1557,3 +1563,40 @@ a {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* multi-document upload: one box (and scan animation) per document */
+.v-split { flex-direction: column !important; min-height: 0 !important; }
+.v-left, .flow .v-left {
+  width: auto !important;
+  border-right: 0 !important;
+  border-bottom: 1px solid var(--rule) !important;
+}
+.slot-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+}
+.slot {
+  background: #fff;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.slot.has-result { cursor: pointer; }
+.slot.sel { border-color: var(--p-teal); box-shadow: 0 0 0 1px var(--p-teal); }
+.slot-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.slot-label { font-size: 13px; font-weight: 600; }
+.slot-badge { font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 0.08em; }
+.slot-badge.ok { color: var(--p-teal); }
+.slot-badge.bad { color: var(--p-danger, #b3261e); }
+.slot .dropzone { height: 170px; padding: 0 8px; }
+.slot-preview { margin-top: 0; }
+.slot-preview .body { aspect-ratio: 4 / 3; }
+.slot-foot { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.slot-foot .nm { font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.slot-foot .meta { font-family: var(--font-mono); font-size: 10px; color: var(--muted); flex: 0 0 auto; }
+.slot-foot .x { margin-left: auto; background: transparent; border: 0; color: var(--muted); }

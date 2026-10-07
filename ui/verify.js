@@ -19,10 +19,21 @@
   const STATUS_GLYPH = { pass: "✓", fail: "✗", skip: "–", na: "–" };
   const STATUS_BADGE = { pass: "PASS", fail: "FAIL", skip: "SKIP", na: "—" };
 
+  // Documents the applicant uploads — one box (with its own scan animation) each.
+  const SLOTS = [
+    { id: "aadhaar", label: "Aadhaar Card" },
+    { id: "ration", label: "Ration Card" },
+    { id: "domicile", label: "Domicile Certificate" },
+    { id: "income", label: "Income Certificate" },
+  ];
+
   V.state = {
-    files: [],
+    slots: SLOTS.map(function (d) { return { id: d.id, label: d.label, file: null, url: null }; }),
+    files: [], // uploaded files, in slot order (what intake + submit operate on)
+    fileSlots: [], // files[k] came from slots[fileSlots[k]]
+    selected: 0, // slot whose report is shown on the right
     overall: null, // ReagvisIntake overall result
-    primary: null, // first file's result (the one rendered)
+    primary: null, // result of the selected slot
     running: false,
     verdict: null, // 'accepted' | 'rejected'
     submitting: false,
@@ -35,17 +46,8 @@
     return (
       '<div class="v-split">' +
       '  <div class="v-left">' +
-      '    <div class="upload-card">' +
-      '      <div id="vDrop" class="dropzone" role="button" tabindex="0">' +
-      '        <span style="color:var(--muted)">' + UI.icon("uploadCloud", 24) + "</span>" +
-      '        <span class="big">Drag &amp; drop or click to browse</span>' +
-      '        <span class="small">PDF, JPG, PNG · max 10 files</span>' +
-      '        <input id="vFiles" type="file" accept=".pdf,.jpg,.jpeg,.png" multiple style="display:none" />' +
-      "      </div>" +
-      '      <div id="vFileList" class="file-list"></div>' +
-      '      <button id="vRun" class="run-btn" disabled>Run verification</button>' +
-      "    </div>" +
-      '    <div id="vPreview"></div>' +
+      '    <div id="vSlots" class="slot-grid"></div>' +
+      '    <button id="vRun" class="run-btn" disabled>Run verification</button>' +
       "  </div>" +
       '  <div class="v-right"><div id="vReport"></div></div>' +
       "</div>"
@@ -53,39 +55,46 @@
   };
 
   V.emptyReportHTML = function () {
-    return '<div class="report-empty">Upload a document and run verification to see the 16-point report and a pass/fail verdict.</div>';
+    return '<div class="report-empty">Upload your documents and run verification to see the 16-point report and a pass/fail verdict for each.</div>';
   };
 
   // ---------- wiring ----------
   V.wire = function () {
-    const drop = document.getElementById("vDrop");
-    const input = document.getElementById("vFiles");
     const run = document.getElementById("vRun");
     const report = document.getElementById("vReport");
-    if (!drop || !input || !run) return;
+    if (!document.getElementById("vSlots") || !run) return;
     report.innerHTML = V.emptyReportHTML();
-
-    drop.addEventListener("click", function () { input.click(); });
-    drop.addEventListener("keydown", function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); } });
-    drop.addEventListener("dragover", function (e) { e.preventDefault(); drop.classList.add("drag"); });
-    drop.addEventListener("dragleave", function () { drop.classList.remove("drag"); });
-    drop.addEventListener("drop", function (e) {
-      e.preventDefault();
-      drop.classList.remove("drag");
-      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) setFiles(e.dataTransfer.files);
-    });
-    input.addEventListener("change", function () { setFiles(input.files); });
+    renderSlots();
+    run.disabled = V.state.files.length === 0;
     run.addEventListener("click", runValidation);
   };
 
-  function setFiles(fileList) {
-    V.state.files = Array.prototype.slice.call(fileList || []).slice(0, 10);
+  function syncFiles() {
+    V.state.files = [];
+    V.state.fileSlots = [];
+    V.state.slots.forEach(function (s, i) {
+      if (s.file) { V.state.files.push(s.file); V.state.fileSlots.push(i); }
+    });
+  }
+
+  function slotResult(i) {
+    const k = V.state.fileSlots.indexOf(i);
+    const files = V.state.overall && V.state.overall.files;
+    return (files && k >= 0 && files[k]) || null;
+  }
+
+  function setSlotFile(i, file) {
+    const slot = V.state.slots[i];
+    if (slot.url) { URL.revokeObjectURL(slot.url); slot.url = null; }
+    slot.file = file || null;
+    if (file) slot.url = URL.createObjectURL(file);
+    syncFiles();
     V.state.overall = null;
     V.state.primary = null;
     V.state.verdict = null;
     V.state.submitted = false;
-    renderFileList();
-    renderPreview();
+    V.state.selected = i;
+    renderSlots();
     const run = document.getElementById("vRun");
     if (run) run.disabled = V.state.files.length === 0;
     const report = document.getElementById("vReport");
@@ -93,58 +102,91 @@
     notifyVerdict();
   }
 
-  function renderFileList() {
-    const el = document.getElementById("vFileList");
-    if (!el) return;
-    el.innerHTML = V.state.files
-      .map(function (f, i) {
-        const isImg = /\.(jpg|jpeg|png)$/i.test(f.name);
-        const ext = (f.name.split(".").pop() || "").toUpperCase();
+  function renderSlots() {
+    const grid = document.getElementById("vSlots");
+    if (!grid) return;
+    grid.innerHTML = V.state.slots
+      .map(function (s, i) {
+        const input = '<input type="file" accept=".pdf,.jpg,.jpeg,.png" data-i="' + i + '" style="display:none" />';
+        if (!s.file) {
+          return (
+            '<div class="slot" data-i="' + i + '">' +
+            '<div class="slot-head"><span class="slot-label">' + UI.esc(s.label) + "</span></div>" +
+            '<div class="dropzone slot-drop" role="button" tabindex="0" data-i="' + i + '">' +
+            '<span style="color:var(--muted)">' + UI.icon("uploadCloud", 24) + "</span>" +
+            '<span class="big">Upload ' + UI.esc(s.label) + "</span>" +
+            '<span class="small">PDF, JPG, PNG</span></div>' + input + "</div>"
+          );
+        }
+        const isPdf = /\.pdf$/i.test(s.file.name);
         return (
-          '<div class="file-chip">' +
-          '<span class="tile">' + UI.icon(isImg ? "fileImage" : "fileText", 16) + "</span>" +
-          '<span class="nm" title="' + UI.esc(f.name) + '">' + UI.esc(f.name) + "</span>" +
-          '<span class="meta">' + UI.prettyBytes(f.size) + " · " + UI.esc(ext) + "</span>" +
-          '<button class="x" data-i="' + i + '" aria-label="Remove">' + UI.icon("x", 14) + "</button>" +
-          "</div>"
+          '<div class="slot has-file" data-i="' + i + '">' +
+          '<div class="slot-head"><span class="slot-label">' + UI.esc(s.label) + '</span><span class="slot-badge"></span></div>' +
+          '<div class="doc-preview slot-preview"><div class="body">' +
+          (isPdf
+            ? '<iframe src="' + s.url + '#toolbar=0"></iframe>'
+            : '<img src="' + s.url + '" alt="' + UI.esc(s.label) + ' preview" />') +
+          '<div class="scanline"></div></div></div>' +
+          '<div class="slot-foot"><span class="nm" title="' + UI.esc(s.file.name) + '">' + UI.esc(s.file.name) + "</span>" +
+          '<span class="meta">' + UI.prettyBytes(s.file.size) + '</span>' +
+          '<button class="x" data-i="' + i + '" aria-label="Remove">' + UI.icon("x", 14) + "</button></div>" +
+          input + "</div>"
         );
       })
       .join("");
-    el.querySelectorAll(".x").forEach(function (b) {
-      b.addEventListener("click", function () {
-        const i = Number(b.getAttribute("data-i"));
-        const arr = V.state.files.slice();
-        arr.splice(i, 1);
-        const dt = new DataTransfer();
-        arr.forEach(function (f) { dt.items.add(f); });
-        setFiles(dt.files);
+
+    grid.querySelectorAll(".slot").forEach(function (el) {
+      const i = Number(el.getAttribute("data-i"));
+      const input = el.querySelector("input[type=file]");
+      const drop = el.querySelector(".slot-drop");
+      if (drop) {
+        drop.addEventListener("click", function () { input.click(); });
+        drop.addEventListener("keydown", function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); } });
+        drop.addEventListener("dragover", function (e) { e.preventDefault(); drop.classList.add("drag"); });
+        drop.addEventListener("dragleave", function () { drop.classList.remove("drag"); });
+        drop.addEventListener("drop", function (e) {
+          e.preventDefault();
+          drop.classList.remove("drag");
+          const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+          if (f) setSlotFile(i, f);
+        });
+      }
+      input.addEventListener("change", function () { if (input.files[0]) setSlotFile(i, input.files[0]); });
+      const x = el.querySelector(".x");
+      if (x) x.addEventListener("click", function (e) { e.stopPropagation(); setSlotFile(i, null); });
+      el.addEventListener("click", function () {
+        if (!slotResult(i)) return;
+        V.state.selected = i;
+        V.state.primary = slotResult(i);
+        renderResults();
+        markSelected();
       });
+    });
+    updateBadges();
+    markSelected();
+  }
+
+  function markSelected() {
+    document.querySelectorAll("#vSlots .slot").forEach(function (el) {
+      el.classList.toggle("sel", !!V.state.primary && Number(el.getAttribute("data-i")) === V.state.selected);
     });
   }
 
-  function renderPreview() {
-    const el = document.getElementById("vPreview");
-    if (!el) return;
-    if (V.previewUrl) { URL.revokeObjectURL(V.previewUrl); V.previewUrl = null; }
-    if (!V.state.files.length) { el.innerHTML = ""; return; }
-    const f = V.state.files[0];
-    V.previewUrl = URL.createObjectURL(f);
-    const isPdf = /\.pdf$/i.test(f.name);
-    el.innerHTML =
-      '<div id="vPreviewCard" class="doc-preview">' +
-      '  <div class="ph"><span>Document preview</span></div>' +
-      '  <div class="body">' +
-      (isPdf
-        ? '<iframe src="' + V.previewUrl + '#toolbar=0"></iframe>'
-        : '<img src="' + V.previewUrl + '" alt="preview" />') +
-      '    <div class="scanline"></div>' +
-      "  </div>" +
-      "</div>";
+  function updateBadges() {
+    document.querySelectorAll("#vSlots .slot").forEach(function (el) {
+      const badge = el.querySelector(".slot-badge");
+      if (!badge) return;
+      const r = slotResult(Number(el.getAttribute("data-i")));
+      badge.className = "slot-badge" + (r ? (r.status === "pass" ? " ok" : " bad") : "");
+      badge.textContent = r ? (r.status === "pass" ? "PASS" : "FAIL") : "";
+      el.classList.toggle("has-result", !!r);
+    });
   }
 
   function setAnalyzing(on) {
-    const card = document.getElementById("vPreviewCard");
-    if (card) card.classList.toggle("analyzing", !!on);
+    document.querySelectorAll("#vSlots .slot-preview").forEach(function (el) {
+      el.classList.toggle("analyzing", !!on);
+    });
   }
 
   async function runValidation() {
@@ -168,12 +210,15 @@
         overall: function () {},
       });
       V.state.overall = overall;
-      V.state.primary = (overall.files && overall.files[0]) || null;
+      V.state.primary = slotResult(V.state.selected) || (overall.files && overall.files[0]) || null;
+      if (V.state.primary) V.state.selected = V.state.fileSlots[overall.files.indexOf(V.state.primary)];
       V.state.verdict = overall.status === "passed" ? "accepted" : "rejected";
       if (V.state.primary && V.state.primary.debug) {
         console.debug("[intake]", V.state.primary.name, V.state.primary.debug);
       }
       renderResults();
+      updateBadges();
+      markSelected();
     } catch (err) {
       console.error("[verify] validation error", err);
       document.getElementById("vReport").innerHTML =
@@ -229,8 +274,9 @@
     if (!report || !result) return;
     const s = computeSummary();
     const accepted = V.state.verdict === "accepted";
-    const fileName = result.name || (V.state.files[0] && V.state.files[0].name) || "document";
-    const multi = (V.state.overall.files || []).length > 1;
+    const slot = V.state.slots[V.state.selected];
+    const fileName = (slot ? slot.label + " — " : "") + (result.name || "document");
+    const multi = false;
     const now = new Date();
     const hhmm = String(now.getHours()).padStart(2, "0") + ":" + String(now.getMinutes()).padStart(2, "0");
 
@@ -331,10 +377,10 @@
   // the file list / preview / results survive navigation away and back).
   V.rehydrate = function () {
     if (!V.state.files.length) return;
-    renderFileList();
-    renderPreview();
+    renderSlots();
     const run = document.getElementById("vRun");
     if (run) run.disabled = V.state.running;
+    if (V.state.running) setAnalyzing(true);
     if (V.state.primary) renderResults();
   };
 

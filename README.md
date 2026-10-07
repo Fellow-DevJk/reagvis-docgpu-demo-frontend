@@ -2,9 +2,9 @@
 
 Static demo frontend for presentation/UAT.
 
-## Frontend (UCC portal re-skin)
+## Frontend (government portal re-skin)
 
-The UI is a static, **no-build** hash-routed single-page app styled as the UCC
+The UI is a static, **no-build** hash-routed single-page app styled as a
 government portal (adapted from the `react-frontend-migration` design, rebuilt in
 vanilla HTML/CSS/JS — no React, no bundler). The **validation engine**
 (`/validators`, `/workers`) and the **API + report logic** in `app.js` are

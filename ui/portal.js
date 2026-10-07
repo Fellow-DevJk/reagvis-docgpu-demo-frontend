@@ -1,4 +1,4 @@
-/* ui/portal.js — UCC portal chrome + screens (Home / Login / Flow / Confirm) and
+/* ui/portal.js — government portal chrome + screens (Home / Login / Flow / Confirm) and
  * the standalone Verify screen. Registers routes and wires each after mount.
  * Faithful re-skin of the React branch; the validator (ui/verify.js) and the
  * API/engine logic are reused unchanged. */
@@ -7,15 +7,6 @@
   const UI = (global.UI = global.UI || {});
   const esc = UI.esc;
   const icon = UI.icon;
-
-  UI.store.flow = UI.store.flow || { step: 1, docType: "", mode: "" };
-
-  const DOC_TYPES = [
-    { id: "marriage", icon: "heart", label: "Marriage Registration" },
-    { id: "live-in", icon: "house", label: "Live-in Relationship" },
-    { id: "succession", icon: "scroll", label: "Will / Succession" },
-    { id: "nullity", icon: "baby", label: "Nullity / Divorce" },
-  ];
 
   // ---------- shared chrome ----------
   function emblem() {
@@ -29,10 +20,18 @@
     );
   }
 
-  function uccUtility() {
+  // Drop the official state emblem at assets/hp-emblem.png; falls back to the placeholder SVG until then.
+  function brandEmblem() {
     return (
-      '<div class="ucc-utility">' +
-      "<span>Email: helpdesk-ucc[at]ukgovernment-demo[dot]in</span>" +
+      '<img class="emblem-img" src="assets/hp-emblem.png" alt="Government of Himachal Pradesh emblem" ' +
+      "onerror=\"this.outerHTML=this.dataset.fallback\" data-fallback='" + emblem().replace(/'/g, "&#39;") + "'>"
+    );
+  }
+
+  function govUtility() {
+    return (
+      '<div class="gov-utility">' +
+      "<span>Email: helpdesk[at]himachal-demo[dot]in</span>" +
       '<span class="acc">Accessibility:' + accButtons() + "</span>" +
       "</div>"
     );
@@ -45,19 +44,18 @@
     );
   }
 
-  function uccHeader(variant) {
+  function govHeader(variant) {
     const right =
       variant === "app"
         ? '<span class="welcome">Welcome, Demo User <a href="#/home">← Home</a></span>'
-        : '<nav class="ucc-nav"><a href="#/home">Home</a><a href="#/home">About Us</a>' +
+        : '<nav class="gov-nav"><a href="#/home">Home</a><a href="#/home">About Us</a>' +
           '<a href="#/home">Services</a><a href="#/home">Download Acts</a><a href="#/home">FAQs</a>' +
           '<a href="#/login" class="btn-login">Login</a></nav>';
     return (
-      '<header class="ucc-header"><div class="inner">' +
-      '<a class="ucc-brand" href="#/home">' + emblem() +
-      "<div><div class='title-hi'>समान नागरिक संहिता</div>" +
-      "<div class='title-en'>Uniform Civil Code · Uttarakhand, 2024</div>" +
-      "<div class='title-note'>[DEMO — placeholder emblem, not the real portal]</div></div></a>" +
+      '<header class="gov-header"><div class="inner">' +
+      '<a class="gov-brand" href="#/home">' + brandEmblem() +
+      "<div><div class='title-hi'>HimParivar</div>" +
+      "<div class='title-en'>Government of Himachal Pradesh</div></div></a>" +
       right +
       "</div></header>"
     );
@@ -78,72 +76,39 @@
       '<rect x="225" y="165" width="10" height="45" fill="#134E4A"/>' +
       '<text x="200" y="150" text-anchor="middle" fill="#A52714" opacity="0.08" font-size="60" font-family="Poppins" transform="rotate(-12 200 150)">DEMO</text>' +
       '<rect x="0" y="240" width="400" height="40" fill="#E47B1C" opacity="0.92"/>' +
-      '<text x="200" y="266" text-anchor="middle" fill="#fff" font-size="13" font-family="Mukta">उत्तराखण्ड सरकार · Government of Uttarakhand</text>' +
+      '<text x="200" y="266" text-anchor="middle" fill="#fff" font-size="13" font-family="Mukta">हिमाचल प्रदेश सरकार · Government of Himachal Pradesh</text>' +
       "</svg>"
     );
   }
 
   // ---------- screens ----------
   function homeScreen() {
-    const services = [
-      { ico: "💍", t: "Marriage Registration", d: "Register a marriage under the UCC." },
-      { ico: "🏠", t: "Live-in Relationship", d: "File a live-in relationship statement." },
-      { ico: "📜", t: "Will & Succession", d: "Record a will or succession claim." },
-      { ico: "🛡️", t: "Document Verification", d: "Verify a certificate's authenticity." },
-    ];
     return (
-      '<div class="portal">' + uccUtility() + uccHeader("public") +
+      '<div class="portal">' + govUtility() + govHeader("public") +
       '<div class="wrap"><section class="hero">' +
       '<div class="illus">' + homeIllustration() + "</div>" +
       '<div class="hero-copy">' +
-      '<div class="eyebrow">Introducing UCC 2024</div>' +
-      "<h1>Uniform Civil Code Registration &amp; Verification</h1>" +
-      "<p>A single, transparent portal for registrations and document verification under the Uniform Civil Code, Uttarakhand 2024. This is a demonstration environment.</p>" +
+      '<div class="eyebrow">Introducing the Citizen Portal</div>' +
+      "<h1>Civil Registration &amp; Verification</h1>" +
+      "<p>A single, transparent portal for registrations and document verification for the Government of Himachal Pradesh. This is a demonstration environment.</p>" +
       '<div class="cta"><a class="btn btn-teal" href="#/login">Apply Now ' + icon("chevronRight", 16) + "</a>" +
       '<a class="btn btn-teal-outline" href="#/login">Verify a Document</a></div>' +
       '<div class="demo-note">Demo only — no data is transmitted or stored.</div>' +
       "</div></section>" +
-      '<h2 class="section-title">Available Services</h2>' +
-      '<div class="service-grid">' +
-      services
-        .map(function (s) {
-          return (
-            '<a class="service-card" href="#/login"><div class="ico">' + s.ico + "</div>" +
-            "<h3>" + esc(s.t) + "</h3><p>" + esc(s.d) + "</p></a>"
-          );
-        })
-        .join("") +
-      "</div></div></div>"
+      "</div></div>"
     );
   }
 
   function loginScreen() {
     return (
-      '<div class="portal">' + uccUtility() + uccHeader("public") +
+      '<div class="portal">' + govUtility() + govHeader("public") +
       '<div class="login-wrap"><div class="login-card">' +
-      '<div class="head"><h2>Sign In to UCC Portal</h2><p>Demo access — no credentials required.</p></div>' +
+      '<div class="head"><h2>Sign In to the Portal</h2><p>Demo access — no credentials required.</p></div>' +
       '<div class="notice">' + icon("alertCircle", 16) +
       "<span>This is a demonstration. Sign-in is simulated; no real authentication is performed. API credentials for verification live in the Connection panel (bottom-right).</span></div>" +
       '<div class="body"><button id="loginBtn" class="btn btn-teal" style="justify-content:center">Login ' + icon("chevronRight", 16) + "</button></div>" +
       "</div></div></div>"
     );
-  }
-
-  function stepper(step) {
-    const nodes = [
-      { n: 1, t: "Select Document", s: "Choose a type" },
-      { n: 2, t: "Verify Mode", s: "Upload or number" },
-      { n: 3, t: "Upload & Verify", s: "Run 16 checks" },
-    ];
-    let html = '<div class="stepper">';
-    nodes.forEach(function (nd, i) {
-      const cls = nd.n < step ? "done" : nd.n === step ? "active" : "";
-      html +=
-        '<div class="node ' + cls + '"><span class="circle">' + (nd.n < step ? icon("check", 16) : nd.n) + "</span>" +
-        '<span class="lbl">' + nd.t + "<small>" + nd.s + "</small></span></div>";
-      if (i < nodes.length - 1) html += '<div class="bar ' + (nd.n < step ? "passed" : "") + '"></div>';
-    });
-    return html + "</div>";
   }
 
   function sidebar() {
@@ -156,7 +121,7 @@
       { ico: "settings", t: "Settings" },
     ];
     return (
-      '<aside class="ucc-sidebar"><nav>' +
+      '<aside class="gov-sidebar"><nav>' +
       items
         .map(function (it) {
           return (
@@ -169,70 +134,32 @@
         .join("") +
       "</nav>" +
       '<div class="who"><span class="av">D</span><div><div style="font-weight:600">Demo User</div>' +
-      '<div style="color:var(--p-subtle);font-size:11px">UCC-260610-00121</div></div></div></aside>'
+      '<div style="color:var(--p-subtle);font-size:11px">HP-260610-00121</div></div></div></aside>'
     );
   }
 
-  function flowStepContent(step) {
-    if (step === 1) {
-      return (
-        "<h2>What document are you verifying?</h2>" +
-        '<p class="sub">Select the type of certificate you want to register or verify.</p>' +
-        '<div class="doc-grid">' +
-        DOC_TYPES.map(function (d) {
-          const sel = UI.store.flow.docType === d.id ? " sel" : "";
-          return (
-            '<button class="doc-card' + sel + '" data-doc="' + d.id + '"><span class="ico">' +
-            icon(d.icon, 20) + "</span>" + esc(d.label) + "</button>"
-          );
-        }).join("") +
-        "</div>"
-      );
-    }
-    if (step === 2) {
-      const dt = DOC_TYPES.filter(function (d) { return d.id === UI.store.flow.docType; })[0];
-      return (
-        "<h2>How do you want to verify the <span style='color:var(--p-teal)'>" + esc(dt ? dt.label : "document") + "</span>?</h2>" +
-        '<p class="sub">Choose a verification mode.</p>' +
-        '<div class="mode-list">' +
-        '<button class="mode-card' + (UI.store.flow.mode === "upload" ? " sel" : "") + '" data-mode="upload">' +
-        '<span class="radio"></span><span><span class="t">Upload the certificate</span>' +
-        '<span class="d">Upload a PDF/JPG/PNG and run the 16-point intake check.</span></span></button>' +
-        '<button class="mode-card' + (UI.store.flow.mode === "number" ? " sel" : "") + '" data-mode="number">' +
-        '<span class="radio"></span><span><span class="t">By certificate / registration number</span>' +
-        '<span class="d">Look up a stored certificate (demo: upload mode recommended).</span></span></button>' +
-        "</div>"
-      );
-    }
-    // step 3 — the validator
+  function flowContent() {
     return (
       "<h2>Upload &amp; verify</h2>" +
-      '<p class="sub">Run the client-side intake checks, then submit the document for forensic analysis.</p>' +
+      '<p class="sub">Upload each document in its own box, run the intake checks, then submit them for forensic analysis.</p>' +
       UI.verify.panelHTML() +
       '<div id="flowBanner"></div>'
     );
   }
 
   function flowScreen() {
-    const step = UI.store.flow.step;
-    const dt = DOC_TYPES.filter(function (d) { return d.id === UI.store.flow.docType; })[0];
-    const crumb =
-      '<div class="breadcrumb"><a href="#/home">Home</a> › <a href="#/flow">Document Verification</a>' +
-      (dt ? " › " + esc(dt.label) : "") + "</div>";
+    const crumb = '<div class="breadcrumb"><a href="#/home">Home</a> › <a href="#/flow">Document Verification</a></div>';
     const footer =
-      '<div class="ucc-footer">' +
+      '<div class="gov-footer">' +
       '<button class="btn btn-ghost" id="flowSave">' + icon("save", 14) + " Save</button>" +
       '<div class="right">' +
-      '<button class="btn btn-ghost" id="flowBack"' + (step === 1 ? " disabled" : "") + ">" + icon("chevronLeft", 14) + " Back</button>" +
-      (step < 3
-        ? '<button class="btn-submit" id="flowNext"' + (step === 1 && !UI.store.flow.docType ? " disabled" : "") + ">Next " + icon("chevronRight", 14) + "</button>"
-        : '<button class="btn-submit" id="flowSubmit" disabled>Submit ' + icon("chevronRight", 14) + "</button>") +
+      '<button class="btn-submit" id="flowSubmit" disabled>Submit ' + icon("chevronRight", 14) + "</button>" +
       "</div></div>";
     return (
-      '<div class="portal flow">' + uccHeader("app") +
+      '<div class="portal flow">' + govHeader("app") +
       '<div class="flow-body">' + sidebar() +
-      '<div class="flow-main">' + crumb + stepper(step) +
-      '<div class="flow-content" id="flowContent">' + flowStepContent(step) + "</div>" +
+      '<div class="flow-main">' + crumb +
+      '<div class="flow-content" id="flowContent">' + flowContent() + "</div>" +
       footer + "</div></div></div>"
     );
   }
@@ -241,7 +168,7 @@
     const c = UI.store.confirm;
     if (!c) {
       return (
-        '<div class="portal">' + uccHeader("app") +
+        '<div class="portal">' + govHeader("app") +
         '<div class="confirm-wrap"><p>No submission found. <a href="#/flow">Start a verification</a>.</p></div></div>'
       );
     }
@@ -250,7 +177,7 @@
       ? '<span style="color:var(--p-teal)">' + icon("checkCircle", 64) + "</span>"
       : '<span style="color:var(--p-danger)">' + icon("xCircle", 64) + "</span>";
     return (
-      '<div class="portal">' + uccHeader("app") +
+      '<div class="portal">' + govHeader("app") +
       '<div class="confirm-wrap">' + bigIco +
       "<h1>" + (ok ? "Verification Submitted" : "Verification Failed") + "</h1>" +
       "<p>" + (ok
@@ -336,54 +263,30 @@
   }
 
   function wireFlow() {
-    document.querySelectorAll(".doc-card").forEach(function (c) {
-      c.addEventListener("click", function () {
-        UI.store.flow.docType = c.getAttribute("data-doc");
-        UI.store.flow.step = 2;
-        UI.mount();
-      });
-    });
-    document.querySelectorAll(".mode-card").forEach(function (c) {
-      c.addEventListener("click", function () {
-        UI.store.flow.mode = c.getAttribute("data-mode");
-        UI.store.flow.step = 3;
-        UI.mount();
-      });
-    });
-    const back = document.getElementById("flowBack");
-    if (back) back.addEventListener("click", function () {
-      if (UI.store.flow.step > 1) { UI.store.flow.step--; UI.mount(); }
-    });
-    const next = document.getElementById("flowNext");
-    if (next) next.addEventListener("click", function () {
-      if (UI.store.flow.step < 3) { UI.store.flow.step++; UI.mount(); }
-    });
     const save = document.getElementById("flowSave");
     if (save) save.addEventListener("click", function () { global.log && global.log("Draft saved (demo no-op)."); });
 
-    if (UI.store.flow.step === 3) {
-      UI.verify.wire();
-      UI.verify.rehydrate();
-      UI.verify.onVerdict = function () { updateFlowVerdictUI(); };
-      updateFlowVerdictUI();
-      const submit = document.getElementById("flowSubmit");
-      if (submit) submit.addEventListener("click", async function () {
-        submit.disabled = true;
-        submit.innerHTML = '<span class="spinner"></span> Submitting…';
-        const res = await UI.verify.submit();
-        if (res.ok) UI.navigate("confirm");
-        else {
-          submit.innerHTML = "Submit " + icon("chevronRight", 14);
-          submit.disabled = !UI.verify.canSubmit();
-          const banner = document.getElementById("flowBanner");
-          if (banner) {
-            banner.innerHTML =
-              '<div class="verdict-banner bad">' + icon("alertTriangle", 18) +
-              "<span><b>Couldn't submit.</b> " + esc(res.message || "Submission failed.") + "</span></div>";
-          }
+    UI.verify.wire();
+    UI.verify.rehydrate();
+    UI.verify.onVerdict = function () { updateFlowVerdictUI(); };
+    updateFlowVerdictUI();
+    const submit = document.getElementById("flowSubmit");
+    if (submit) submit.addEventListener("click", async function () {
+      submit.disabled = true;
+      submit.innerHTML = '<span class="spinner"></span> Submitting…';
+      const res = await UI.verify.submit();
+      if (res.ok) UI.navigate("confirm");
+      else {
+        submit.innerHTML = "Submit " + icon("chevronRight", 14);
+        submit.disabled = !UI.verify.canSubmit();
+        const banner = document.getElementById("flowBanner");
+        if (banner) {
+          banner.innerHTML =
+            '<div class="verdict-banner bad">' + icon("alertTriangle", 18) +
+            "<span><b>Couldn't submit.</b> " + esc(res.message || "Submission failed.") + "</span></div>";
         }
-      });
-    }
+      }
+    });
   }
 
   function wireConfirm() {
